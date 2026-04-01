@@ -63,11 +63,18 @@ jobs:
           body="${{ github.event.pull_request.body }}"
           echo "PR body: $body"
 
+          # Also check PR comments for test classes
+          comments=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" | jq -r '.[].body // empty' 2>/dev/null || echo "")
+          echo "PR comments: $comments"
+
+          # Combine body and comments
+          full_text="$body $comments"
+
           # Extract test classes from any line containing "tests: Class1, Class2" or "testclasses: Class1"
-          extracted=$(echo "$body" | grep -iE 'test(classes)?:[[:space:]]*' | head -n1 | sed -E 's/.*test(classes)?:[[:space:]]*//' | tr -d '\r' | xargs)
+          extracted=$(echo "$full_text" | grep -iE 'test(classes)?:[[:space:]]*' | head -n1 | sed -E 's/.*test(classes)?:[[:space:]]*//' | tr -d '\r' | xargs)
 
           if [ -z "$extracted" ]; then
-            echo "No test classes specified in PR body."
+            echo "No test classes specified in PR body or comments."
             echo "test_level=none" >> $GITHUB_OUTPUT
           else
             echo "Detected test classes: $extracted"
