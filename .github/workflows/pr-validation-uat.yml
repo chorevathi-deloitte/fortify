@@ -92,15 +92,29 @@ jobs:
             echo "test_classes=$extracted" >> $GITHUB_OUTPUT
           fi
 
+      - name: Install SGD plugin
+        run: |
+          echo y | sf plugins install sfdx-git-delta
+          git config --global --add safe.directory $GITHUB_WORKSPACE
+
+      - name: Build delta package list with SGD
+        id: sgd-delta
+        run: |
+          source_commit="${{ vars.CRT_UAT_COMMIT_ID }}"
+          echo "Using source commit: $source_commit"
+          sf sgd:source:delta --from "$source_commit" --to "HEAD" --output-dir "." --source-dir force-app/
+
       - name: Compute delta and decide test behavior
         id: delta-tests
         run: |
+          changed_files=$(find force-app -type f | sed 's|^||' | sort | uniq)
+          echo "Changed files from sgd:source:delta:\n$changed_files"
           base_sha="${{ github.event.pull_request.base.sha }}"
           head_sha="${{ github.event.pull_request.head.sha }}"
           echo "Base SHA: $base_sha"; echo "Head SHA: $head_sha"
 
-          changed_files=$(git diff --name-only $base_sha $head_sha || true)
-          echo "Changed files:\n$changed_files"
+          changed_status=$(git diff --name-status $base_sha $head_sha || true)
+          echo "Changed status lines:\n$changed_status"
 
           changed_status=$(git diff --name-status $base_sha $head_sha || true)
           echo "Changed status lines:\n$changed_status"
@@ -239,6 +253,7 @@ jobs:
 
           # deleted apex etc for destructive package
           apex_deleted_files=$(echo "$changed_status" | awk '/^D[[:space:]]+force-app\/main\/default\/.*\.(cls|cls-meta.xml)$/ {print $2}' || true)
+
           apex_changed_classes=""
           while IFS= read -r file; do
             if [[ "$file" =~ ^force-app/main/default/classes/.*\.cls$ ]]; then
@@ -272,7 +287,46 @@ jobs:
             done
           fi
 
+          # Collect changed test classes from delta
+          changed_test_classes=$(echo "$changed_files" | grep -E '^force-app/main/default/classes/.*(Test|Tests)\.cls$' | sed -E 's|^force-app/main/default/classes/(.*)\.cls$|\1|' | sort -u | paste -sd "," -)
+
+          # Infer test classes from changed Apex classes (auto-detect by naming conventions)
+          inferred_test_classes=""
+          if [ -n "$apex_changed_classes" ]; then
+            for className in $(echo "$apex_changed_classes" | tr ',' ' '); do
+              for suffix in "Test" "Tests" "TestClass"; do
+                candidate="${className}${suffix}"
+                # ensure candidate exists in repository or changed test list
+                if [ -f "force-app/main/default/classes/${candidate}.cls" ] || echo ",${changed_test_classes}," | grep -q ",${candidate},"; then
+                  if [ -z "$inferred_test_classes" ]; then
+                    inferred_test_classes="$candidate"
+                  else
+                    case ",${inferred_test_classes}," in
+                      *,${candidate},*) ;;
+                      *) inferred_test_classes+=",$candidate" ;;
+                    esac
+                  fi
+                fi
+              done
+            done
+          fi
+
+          # Combine explicit changed tests and inferred tests
+          if [ -n "$changed_test_classes" ]; then
+            for candidate in $(echo "$changed_test_classes" | tr ',' ' '); do
+              if [ -z "$inferred_test_classes" ]; then
+                inferred_test_classes="$candidate"
+              else
+                case ",${inferred_test_classes}," in
+                  *,${candidate},*) ;;
+                  *) inferred_test_classes+=",$candidate" ;;
+                esac
+              fi
+            done
+          fi
+
           echo "apex_changed_classes=$apex_changed_classes" >> $GITHUB_OUTPUT
+          echo "inferred_test_classes=$inferred_test_classes" >> $GITHUB_OUTPUT
 
           # write package manifest for all collected metadata types
           if [ ${#typeMembers[@]} -gt 0 ]; then
@@ -287,7 +341,7 @@ jobs:
               echo "    <name>$key</name>" >> "$temp_manifest"
               echo "  </types>" >> "$temp_manifest"
             done
-            echo "  <version>56.0</version>" >> "$temp_manifest"
+            echo "  <version>66.0</version>" >> "$temp_manifest"
             echo "</Package>" >> "$temp_manifest"
             echo "deploy_manifest=$temp_manifest" >> $GITHUB_OUTPUT
             echo "Delta package.xml contents:"; cat "$temp_manifest"
@@ -301,7 +355,7 @@ jobs:
             echo "  <types>" >> "$temp_destructive"
             echo "    <name>ApexClass</name>" >> "$temp_destructive"
             echo "  </types>" >> "$temp_destructive"
-            echo "  <version>56.0</version>" >> "$temp_destructive"
+            echo "  <version>66.0</version>" >> "$temp_destructive"
             echo "</Package>" >> "$temp_destructive"
             echo "destructive_manifest=$temp_destructive" >> $GITHUB_OUTPUT
             echo "Destructive package.xml content:"; cat "$temp_destructive"
@@ -344,18 +398,19 @@ jobs:
         run: |
           apex_required="${{ steps.delta-tests.outputs.apex_required }}"
           test_level="${{ steps.set-test-classes.outputs.test_level }}"
-          test_classes="${{ steps.set-test-classes.outputs.test_classes }}"
+          pr_test_classes="${{ steps.set-test-classes.outputs.test_classes }}"
+          inferred_test_classes="${{ steps.delta-tests.outputs.inferred_test_classes }}"
           manifest_path="${{ steps.delta-tests.outputs.deploy_manifest }}"
           destructive_path="${{ steps.delta-tests.outputs.destructive_manifest }}"
 
           deploy_cmd="sfdx force:source:deploy -u uat --checkonly --verbose --json"
 
           if [ -n "$manifest_path" ]; then
-            echo "Using generated manifest for changed Apex metadata: $manifest_path"
+            echo "Using generated manifest for changed metadata: $manifest_path"
             cat "$manifest_path"
             deploy_cmd="$deploy_cmd --manifest $manifest_path"
           else
-            echo "No changed Apex classes found in delta manifest; defaulting to full force-app deployment";
+            echo "No changed metadata found in delta manifest; defaulting to full force-app deployment";
             deploy_cmd="$deploy_cmd -p force-app/main/default"
           fi
 
@@ -364,15 +419,31 @@ jobs:
             deploy_cmd="$deploy_cmd -x $destructive_path"
           fi
 
-          if [ "$apex_required" != "true" ]; then
+          # Combine PR-requested and inferred test classes
+          all_test_classes=""
+          if [ -n "$pr_test_classes" ]; then
+            all_test_classes="$pr_test_classes"
+          fi
+          if [ -n "$inferred_test_classes" ]; then
+            if [ -z "$all_test_classes" ]; then
+              all_test_classes="$inferred_test_classes"
+            else
+              all_test_classes="$all_test_classes,$inferred_test_classes"
+            fi
+          fi
+
+          # dedupe list
+          all_test_classes=$(echo "$all_test_classes" | tr ',' '\n' | awk '!seen[$0]++' | paste -sd ',' -)
+
+          if [ -n "$all_test_classes" ]; then
+            echo "Running tests: $all_test_classes"
+            deploy_cmd="$deploy_cmd --testlevel RunSpecifiedTests --runtests $all_test_classes"
+          elif [ "$apex_required" = "true" ]; then
+            echo "Apex classes changed but no test classes found. Please add tests in PR description or include test classes in PR commit."
+            exit 1
+          else
             echo "No Apex class changes required; using NoTestRun"
             deploy_cmd="$deploy_cmd --testlevel NoTestRun"
-          elif [ "$test_level" = "RunSpecifiedTests" ] && [ -n "$test_classes" ]; then
-            echo "Apex changes with requested tests: $test_classes"
-            deploy_cmd="$deploy_cmd --testlevel RunSpecifiedTests --runtests $test_classes"
-          else
-            echo "Apex classes changed but no test classes specified in PR comments. Please update the PR with tests."
-            exit 1
           fi
 
           echo "Final deploy command: $deploy_cmd"
