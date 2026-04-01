@@ -69,9 +69,15 @@ jobs:
 
           # Combine body and comments
           full_text="$body $comments"
+          echo "Full combined text: $full_text"
 
-          # Extract test classes from any line containing "tests: Class1, Class2" or "testclasses: Class1"
-          extracted=$(echo "$full_text" | grep -iE 'test(classes)?:[[:space:]]*' | head -n1 | sed -E 's/.*test(classes)?:[[:space:]]*//' | tr -d '\r' | xargs)
+          # Extract test classes using awk (case-insensitive match for 'tests:' or 'testclasses:')
+          RAW_CLASSES=$(echo "$full_text" | awk 'BEGIN{IGNORECASE=1} /test(classes)?:[ ]*/ { match($0, /test(classes)?:[ ]*([^.\n]*)/, arr); print arr[1]; exit }')
+          echo "Raw extracted classes: '$RAW_CLASSES'"
+
+          # Clean up: replace commas with spaces, trim spaces
+          extracted=$(echo "$RAW_CLASSES" | tr ',' ' ' | xargs)
+          echo "Cleaned test classes: '$extracted'"
 
           if [ -z "$extracted" ]; then
             echo "No test classes specified in PR body or comments."
