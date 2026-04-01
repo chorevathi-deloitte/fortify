@@ -31,7 +31,16 @@ jobs:
         run: npm ci
 
       - name: Install Salesforce CLI
-        uses: salesforce/sfdx-action@v2
+        # Use the maintained setup action and fallback to npm install for resilience
+        uses: sfdx-actions/setup-sfdx@v1
+
+      - name: Verify Salesforce CLI installed
+        run: |
+          if ! command -v sfdx >/dev/null; then
+            echo "sfdx not found, installing via npm"
+            npm install -g sfdx-cli
+          fi
+          sfdx --version
 
       - name: Authenticate to UAT org
         env:
