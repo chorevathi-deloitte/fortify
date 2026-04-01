@@ -137,6 +137,11 @@ jobs:
             file_path="$1"
             rel="$2"
 
+            # Skip metadata files - only process the actual file
+            if [[ "$rel" == *-meta.xml ]]; then
+              return
+            fi
+
             # If the file contains <fullName>, prefer that as API name
             if [ -f "$file_path" ] && grep -q '<fullName>' "$file_path" 2>/dev/null; then
               fullName=$(grep -oPm1 '(?<=<fullName>)[^<]+' "$file_path" 2>/dev/null || true)
@@ -144,33 +149,33 @@ jobs:
             fi
 
             case "$rel" in
-              classes/*.cls|classes/*.cls-meta.xml)
+              classes/*.cls)
                 echo "$(basename "$rel" .cls)" ;;
-              triggers/*.trigger|triggers/*.trigger-meta.xml)
+              triggers/*.trigger)
                 echo "$(basename "$rel" .trigger)" ;;
-              pages/*.page|pages/*.page-meta.xml)
+              pages/*.page)
                 echo "$(basename "$rel" .page)" ;;
-              components/*.component|components/*.component-meta.xml)
+              components/*.component)
                 echo "$(basename "$rel" .component)" ;;
               aura/*/*)
                 echo "$(echo "$rel" | cut -d'/' -f2)" ;;
               lwc/*/*)
                 echo "$(echo "$rel" | cut -d'/' -f2)" ;;
-              objects/*.object|objects/*.object-meta.xml)
+              objects/*.object)
                 echo "$(basename "$rel" .object)" ;;
-              objects/*/object/*|objects/*/*.object)
+              objects/*/object/*)
                 echo "$(echo "$rel" | cut -d'/' -f2)" ;;
-              permissionsets/*.permissionset|permissionsets/*.permissionset-meta.xml)
+              permissionsets/*.permissionset)
                 echo "$(basename "$rel" .permissionset)" ;;
-              profiles/*.profile|profiles/*.profile-meta.xml)
+              profiles/*.profile)
                 echo "$(basename "$rel" .profile)" ;;
-              staticresources/*.resource|staticresources/*.resource-meta.xml)
+              staticresources/*.resource)
                 echo "$(basename "$rel" .resource)" ;;
-              labels/*.labels|labels/*.labels-meta.xml)
+              labels/*.labels)
                 echo "CustomLabels" ;;
-              flows/*.flow|flows/*.flow-meta.xml)
+              flows/*.flow)
                 echo "$(basename "$rel" .flow)" ;;
-              datacategorygroups/*.datacategorygroup|datacategorygroups/*.datacategorygroup-meta.xml)
+              datacategorygroups/*.datacategorygroup)
                 echo "$(basename "$rel" .datacategorygroup)" ;;
               * )
                 echo "$(basename "${rel%.*}")" ;;
@@ -180,6 +185,10 @@ jobs:
           normalized=
           while IFS= read -r file; do
             [ -z "$file" ] && continue
+            # Skip metadata files - we only need the actual source file
+            if [[ "$file" == *-meta.xml ]]; then
+              continue
+            fi
             if [[ ! "$file" =~ ^force-app/main/default/ ]]; then
               continue
             fi
@@ -199,7 +208,7 @@ jobs:
                 meta="AuraDefinitionBundle" ;;
               lwc/*/*)
                 meta="LightningComponentBundle" ;;
-              objects/*.object|objects/*.object-meta.xml|objects/*/object/*|objects/*/*.object)
+              objects/*.object|objects/*/object/*)
                 meta="CustomObject" ;;
               permissionsets/*)
                 meta="PermissionSet" ;;
@@ -219,13 +228,8 @@ jobs:
                 ;;
             esac
 
-            # Prefer the metadata fullName if present for API compatibility
+            # Get API name for this source file
             file_path="./$file"
-            if [[ "$rel" == *-meta.xml ]]; then
-              base_file="$file"
-            else
-              base_file="$file"
-            fi
             fullname=$(get_api_name "$file_path" "$rel")
 
             if [ -n "$meta" ] && [ -n "$fullname" ]; then
