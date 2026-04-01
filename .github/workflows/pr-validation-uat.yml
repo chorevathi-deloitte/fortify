@@ -400,7 +400,11 @@ jobs:
           fi
 
       - name: Run check-only deploy to UAT org
+        shell: bash
         run: |
+  
+          set -euo pipefail
+
           apex_required="${{ steps.delta-tests.outputs.apex_required }}"
           test_level="${{ steps.set-test-classes.outputs.test_level }}"
           pr_test_classes="${{ steps.set-test-classes.outputs.test_classes }}"
@@ -408,28 +412,29 @@ jobs:
           manifest_path="${{ steps.delta-tests.outputs.deploy_manifest }}"
           destructive_path="${{ steps.delta-tests.outputs.destructive_manifest }}"
 
-          deploy_cmd="sfdx force:source:deploy -u uat --checkonly --verbose --json"
+          # Build command as an array (safer than eval)
+          deploy_cmd=(sfdx force:source:deploy -u uat --checkonly --verbose --json)
 
-          if [ -n "$manifest_path" ]; then
+          if [ -n "${manifest_path:-}" ]; then
             echo "Using generated manifest for changed metadata: $manifest_path"
             cat "$manifest_path"
-            deploy_cmd="$deploy_cmd --manifest $manifest_path"
+            deploy_cmd+=(--manifest "$manifest_path")
           else
-            echo "No changed metadata found in delta manifest; defaulting to full force-app deployment";
-            deploy_cmd="$deploy_cmd -p force-app/main/default"
+            echo "No changed metadata found in delta manifest; defaulting to full force-app deployment"
+            deploy_cmd+=(-p force-app/main/default)
           fi
 
-          if [ -n "$destructive_path" ]; then
+          if [ -n "${destructive_path:-}" ]; then
             echo "Including destructive changes manifest: $destructive_path"
-            deploy_cmd="$deploy_cmd -x $destructive_path"
+            deploy_cmd+=(-x "$destructive_path")
           fi
 
-          # Combine PR-requested and inferred test classes
+          # Combine PR-requested and inferred test classes (comma-separated)
           all_test_classes=""
-          if [ -n "$pr_test_classes" ]; then
+          if [ -n "${pr_test_classes:-}" ]; then
             all_test_classes="$pr_test_classes"
           fi
-          if [ -n "$inferred_test_classes" ]; then
+          if [ -n "${inferred_test_classes:-}" ]; then
             if [ -z "$all_test_classes" ]; then
               all_test_classes="$inferred_test_classes"
             else
@@ -437,22 +442,34 @@ jobs:
             fi
           fi
 
-          # dedupe list
-          all_test_classes=$(echo "$all_test_classes" | tr ',' '\n' | awk '!seen[$0]++' | paste -sd ',' -)
+          # Dedupe -> newline-separated list (no commas)
+          tests_deduped="$(echo "$all_test_classes" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | awk '!seen[$0]++')"
 
-          if [ -n "$all_test_classes" ]; then
-            echo "Running tests: $all_test_classes"
-            deploy_cmd="$deploy_cmd --testlevel RunSpecifiedTests --runtests $all_test_classes"
+          if [ -n "${tests_deduped:-}" ]; then
+            echo "Running tests:"
+            echo "$tests_deduped"
+
+            deploy_cmd+=(--testlevel RunSpecifiedTests)
+
+            # Repeated --runtests flags (no commas)
+            while IFS= read -r t; do
+              [ -z "$t" ] && continue
+              deploy_cmd+=(--runtests "$t")
+            done <<< "$tests_deduped"
+
           elif [ "$apex_required" = "true" ]; then
             echo "Apex classes changed but no test classes found. Please add tests in PR description or include test classes in PR commit."
             exit 1
           else
             echo "No Apex class changes required; using NoTestRun"
-            deploy_cmd="$deploy_cmd --testlevel NoTestRun"
+            deploy_cmd+=(--testlevel NoTestRun)
           fi
 
-          echo "Final deploy command: $deploy_cmd"
-          eval "$deploy_cmd" > deploy-output.json
+          echo "Final deploy command:"
+          printf ' %q' "${deploy_cmd[@]}"
+          echo
+
+          "${deploy_cmd[@]}" > deploy-output.json
 
       - name: Check coverage from deploy results
         run: |
