@@ -71,9 +71,13 @@ jobs:
           full_text="$body $comments"
           echo "Full combined text: $full_text"
 
-          # Extract test classes using awk (case-insensitive match for 'tests:' or 'testclasses:')
-          RAW_CLASSES=$(echo "$full_text" | awk 'BEGIN{IGNORECASE=1} /test(classes)?:[ ]*/ { match($0, /test(classes)?:[ ]*([^.\n]*)/, arr); print arr[1]; exit }')
-          echo "Raw extracted classes: '$RAW_CLASSES'"
+          # Extract test classes: find line with "test" + ":" and extract after colon
+          line=$(echo "$full_text" | grep -i "test" | grep ":" | head -1)
+          echo "Matched line: $line"
+
+          # Remove everything before and including the colon
+          RAW_CLASSES=$(echo "$line" | sed 's/^[^:]*:[[:space:]]*//')
+          echo "Raw extracted: '$RAW_CLASSES'"
 
           # Clean up: replace commas with spaces, trim spaces
           extracted=$(echo "$RAW_CLASSES" | tr ',' ' ' | xargs)
