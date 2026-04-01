@@ -63,8 +63,8 @@ jobs:
           body="${{ github.event.pull_request.body }}"
           echo "PR body: $body"
 
-          extracted=$(echo "$body" | grep -iEo 'test(classes)?:[[:space:]]*[^\n]+' | head -n1 | sed -E 's/^[^:]+:[[:space:]]*//I')
-          extracted=$(echo "$extracted" | awk '{gsub(/ /,""); print}')
+          # Extract test classes from lines like "tests: Class1, Class2" or "testclasses: Class1"
+          extracted=$(echo "$body" | grep -iE '^test(classes)?:[[:space:]]*' | head -n1 | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | xargs)
 
           if [ -z "$extracted" ]; then
             echo "No test classes specified in PR body."
