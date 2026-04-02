@@ -1,4 +1,4 @@
-@IsTest(testFor='ApexClass: SmokeTestPingResource')
+@IsTest
 private class SmokeTestPingResourceTest {
 
     @IsTest
