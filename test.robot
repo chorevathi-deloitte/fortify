@@ -6,6 +6,7 @@ Library                         QWeb
 Library                         BuiltIn
 Library                         QVision
 Library                         FakerLibrary
+Resource                        common.robot
 
 *** Test Cases ***
 UserCreation
