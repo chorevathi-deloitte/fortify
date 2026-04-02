@@ -12,7 +12,7 @@ Library                         SeleniumLibrary
 # IMPORTANT: Please read the readme.txt to understand needed variables and how to handle them!!!!
 ${BROWSER}                      chrome
 ${username}                     pace.delivery1@qentinel.com.demonew
-${home_url}                     ${login_url}/lightning/page/home
+${home_url}                     https://orgfarm-aeae42f95e-dev-ed.develop.my.salesforce-setup.com
 ${ENVIRONMENT}
 
 *** Keywords ***
