@@ -82,23 +82,6 @@ jobs:
             echo "No destructive changes detected — skipping destructive deploy step."
           fi
 
-
-          - name: CRT Test Execution
-
-          on:
-
-              pull_request:
-
-                branches: [ main ]
-
-
-                jobs:
-
-                  run-crt-tests:
-
-                    runs-on: ubuntu-latest
-
-                  
       - name: Deploy (no destructive changes)
         # Runs when there are no destructive changes
         run: |
@@ -112,11 +95,20 @@ jobs:
             echo "Destructive deploy was handled in the previous step — skipping plain deploy."
           fi
 
-              steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+  # ──────────────────────────────────────────────
+  # JOB 2: Run CRT smoke tests against UAT org
+  # ──────────────────────────────────────────────
+  smoke-test:
+    name: Run CRT Smoke Tests
+    runs-on: ubuntu-latest
+    needs: deploy
+    timeout-minutes: 30
 
-      - name: Trigger CRT Test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Trigger CRT Smoke Test
         env:
           CRT_API_TOKEN: ${{ secrets.CRT_API_TOKEN }}
           CRT_SERVER_URL: ${{ secrets.CRT_SERVER_URL }}
