@@ -499,7 +499,10 @@ jobs:
           fi
 
       - name: Check coverage from deploy results
+        shell: bash
         run: |
+          set -euo pipefail
+
           apex_required="${{ steps.delta-tests.outputs.apex_required }}"
 
           if [ "$apex_required" != "true" ]; then
@@ -507,18 +510,39 @@ jobs:
             exit 0
           fi
 
-          coverage=$(jq -r '.result.details.runTestResult.codeCoverage | if type=="object" then .coveragePercent // .overallCoverage else empty end' deploy-output.json 2>/dev/null || true)
-
-          if [ -z "$coverage" ] || [ "$coverage" = "null" ]; then
-            echo "Could not determine coverage from deploy output; failing for safety."
+          if [ ! -f deploy-output.json ]; then
+            echo "deploy-output.json not found; failing for safety."
             exit 1
           fi
 
-          echo "Test coverage: $coverage%"
+          # Compute overall coverage from per-class coverage array:
+          # overall = (sum(numLocations) - sum(numLocationsNotCovered)) / sum(numLocations) * 100
+          total=$(jq -r '[.result.details.runTestResult.codeCoverage[]? | .numLocations // 0] | add // 0' deploy-output.json 2>/dev/null || echo 0)
+          uncovered=$(jq -r '[.result.details.runTestResult.codeCoverage[]? | .numLocationsNotCovered // 0] | add // 0' deploy-output.json 2>/dev/null || echo 0)
+
+          if [ -z "$total" ] || [ "$total" = "null" ]; then total=0; fi
+          if [ -z "$uncovered" ] || [ "$uncovered" = "null" ]; then uncovered=0; fi
+
+          if [ "$total" -le 0 ]; then
+            echo "Could not determine coverage from deploy output; failing for safety."
+            echo "Debug: top-level message/status:"
+            jq -r '{status: .status, message: .message} | @json' deploy-output.json 2>/dev/null || true
+            echo "Debug: runTestResult keys:"
+            jq -r '.result.details.runTestResult | keys' deploy-output.json 2>/dev/null || true
+            echo "Debug: first 200 lines of deploy-output.json:"
+            sed -n '1,200p' deploy-output.json || true
+            exit 1
+          fi
+
+          covered=$(( total - uncovered ))
+          coverage=$(awk -v c="$covered" -v t="$total" 'BEGIN { printf "%.2f", (c/t)*100 }')
+
+          echo "Coverage calc: covered=$covered total=$total => $coverage%"
+
           required=85
-          exceed=$(echo "$coverage >= $required" | bc -l)
-          if [ "$exceed" -ne 1 ]; then
-            echo "Test coverage $coverage% is below required $required%";
+          below=$(awk -v cov="$coverage" -v req="$required" 'BEGIN { print (cov < req) ? 1 : 0 }')
+          if [ "$below" -eq 1 ]; then
+            echo "Test coverage $coverage% is below required $required%"
             exit 1
           fi
 
