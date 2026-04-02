@@ -1,24 +1,96 @@
-name: PR -> UAT Org validation + code analysis
+name: PR Validation UAT + Security Gates + Auto Merge + Deploy
 
 on:
   pull_request:
     branches:
       - uat
+      - UberDemo
     types:
       - opened
       - reopened
       - synchronize
       - edited
       - ready_for_review
+    paths:
+      - force-app/**
+
+  pull_request_review:
+    types:
+      - submitted
+
+  workflow_dispatch:
+    inputs:
+      scanner:
+        description: Scanner to run (checkmarx | fortify | all)
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - checkmarx
+          - fortify
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.review.pull_request_url || github.ref_name || github.run_id }}
+  cancel-in-progress: true
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  ORG_ALIAS: ${{ vars.ORG_ALIAS || 'uat' }}
+  SFDX_AUTH_SECRET_NAME: ${{ vars.SFDX_AUTH_SECRET_NAME || 'CRT_UAT_AUTHURL' }}
+  DELTA_FROM_COMMIT_VAR: ${{ vars.DELTA_FROM_COMMIT_VAR || 'CRT_UAT_COMMIT_ID' }}
+  COVERAGE_THRESHOLD: ${{ vars.COVERAGE_THRESHOLD || '85' }}
+  SOURCE_DIR: ${{ vars.SOURCE_DIR || 'force-app/main/default' }}
+  FCLI_BOOTSTRAP_VERSION: v3.16.0
 
 jobs:
-  sfdx-validation:
-    name: Deploy check + static analysis
+  setup:
+    name: Evaluate Scanner Availability
+    if: ${{ github.event_name != 'pull_request_review' }}
     runs-on: ubuntu-latest
+    outputs:
+      run-checkmarx: ${{ steps.eval.outputs.run-checkmarx }}
+      run-fortify: ${{ steps.eval.outputs.run-fortify }}
+    steps:
+      - name: Determine which scanners to run
+        id: eval
+        env:
+          HAS_CX: ${{ secrets.CX_CLIENT_SECRET != '' }}
+          HAS_FOD: ${{ secrets.FOD_CLIENT_SECRET != '' }}
+          SCANNER: ${{ github.event.inputs.scanner || 'all' }}
+        run: |
+          set -euo pipefail
 
+          run_checkmarx=false
+          run_fortify=false
+
+          if [[ "$HAS_CX" == "true" && ("$SCANNER" == "checkmarx" || "$SCANNER" == "all") ]]; then
+            run_checkmarx=true
+          fi
+
+          if [[ "$HAS_FOD" == "true" && ("$SCANNER" == "fortify" || "$SCANNER" == "all") ]]; then
+            run_fortify=true
+          fi
+
+          echo "run-checkmarx=$run_checkmarx" >> "$GITHUB_OUTPUT"
+          echo "run-fortify=$run_fortify" >> "$GITHUB_OUTPUT"
+
+  salesforce-validation:
+    name: Salesforce PR validation
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -27,370 +99,828 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install npm deps
+      - name: Install npm dependencies
         run: |
-          if [ -f package-lock.json ]; then
-            echo "package-lock.json found; running npm ci"
+          set -euo pipefail
+          if [[ -f package-lock.json ]]; then
             npm ci
           else
-            echo "package-lock.json not found; running npm install"
             npm install
           fi
 
       - name: Install Salesforce CLI
-        # Use the maintained setup action and fallback to npm install for resilience
-        uses: sfdx-actions/setup-sfdx@v1
+        run: npm install --global @salesforce/cli
 
-      - name: Verify Salesforce CLI installed
-        run: |
-          if ! command -v sfdx >/dev/null; then
-            echo "sfdx not found, installing via npm"
-            npm install -g sfdx-cli
-          fi
-          sfdx --version
-
-      - name: Authenticate to UAT org
+      - name: Authenticate target org
         env:
-          SFDX_AUTH_URL: ${{ secrets.CRT_UAT_AUTHURL }}
+          SFDX_AUTH_URL: ${{ secrets[env.SFDX_AUTH_SECRET_NAME] }}
         run: |
-          echo "$SFDX_AUTH_URL" > sfdxAuthUrl.txt
-          sfdx auth:sfdxurl:store -f sfdxAuthUrl.txt -a uat
-          sfdx force:org:display -u uat
+          set -euo pipefail
+          if [[ -z "${SFDX_AUTH_URL:-}" ]]; then
+            echo "::error::Required auth URL secret '$SFDX_AUTH_SECRET_NAME' is missing or empty."
+            exit 1
+          fi
+          printf '%s' "$SFDX_AUTH_URL" > sfdxAuthUrl.txt
+          sf org login sfdx-url --sfdx-url-file sfdxAuthUrl.txt --alias "$ORG_ALIAS"
+          rm -f sfdxAuthUrl.txt
+          sf org display --target-org "$ORG_ALIAS"
 
-      - name: Determine target test classes from PR description
-        id: set-test-classes
+      - name: Extract test classes from PR description and comments
+        id: pr-tests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          body="${{ github.event.pull_request.body }}"
-          echo "PR body: $body"
+          set -euo pipefail
+          comments=$(gh api \
+            "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            --jq '.[].body' 2>/dev/null || echo "")
 
-          # Extract test classes from lines like "tests: Class1, Class2" or "testclasses: Class1"
-          extracted=$(echo "$body" | grep -iE '^test(classes)?:[[:space:]]*' | head -n1 | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '\r' | xargs)
+          full_text="$PR_BODY
+          $comments"
 
-          if [ -z "$extracted" ]; then
-            echo "No test classes specified in PR body."
-            echo "test_level=none" >> $GITHUB_OUTPUT
+          line=$(echo "$full_text" | grep -iE '^\s*(tests?(\s+classes?)?)\s*:' | head -1 || true)
+          raw_classes=$(echo "$line" | sed 's/^[^:]*:[[:space:]]*//')
+          extracted=$(echo "$raw_classes" | tr ',' ' ' | xargs || true)
+
+          if [[ -z "${extracted:-}" ]]; then
+            echo "test_level=none" >> "$GITHUB_OUTPUT"
+            echo "test_classes=" >> "$GITHUB_OUTPUT"
           else
-            echo "Detected test classes: $extracted"
-            echo "test_level=RunSpecifiedTests" >> $GITHUB_OUTPUT
-            echo "test_classes=$extracted" >> $GITHUB_OUTPUT
+            echo "test_level=RunSpecifiedTests" >> "$GITHUB_OUTPUT"
+            echo "test_classes=$extracted" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Compute delta and decide test behavior
-        id: delta-tests
+      - name: Install sfdx-git-delta plugin
         run: |
-          base_sha="${{ github.event.pull_request.base.sha }}"
-          head_sha="${{ github.event.pull_request.head.sha }}"
-          echo "Base SHA: $base_sha"; echo "Head SHA: $head_sha"
+          set -euo pipefail
+          echo y | sf plugins install sfdx-git-delta || npm install -g sfdx-git-delta@latest
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-          changed_files=$(git diff --name-only $base_sha $head_sha || true)
-          echo "Changed files:\n$changed_files"
-
-          changed_status=$(git diff --name-status $base_sha $head_sha || true)
-          echo "Changed status lines:\n$changed_status"
-
-          package_changed=$(echo "$changed_files" | grep -E '^manifest/package.xml$' || true)
-
-          has_apex_in_package="false"
-          if [ -f manifest/package.xml ] && grep -q '<name>ApexClass</name>' manifest/package.xml; then
-            has_apex_in_package="true"
+      - name: Build delta package
+        env:
+          DELTA_FROM_COMMIT: ${{ vars[env.DELTA_FROM_COMMIT_VAR] }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${DELTA_FROM_COMMIT:-}" ]]; then
+            echo "::error::Required repository variable '$DELTA_FROM_COMMIT_VAR' is missing or empty."
+            exit 1
           fi
 
-          # Setup structures
-          temp_manifest="./.github/temp/package.xml"
-          temp_destructive="./.github/temp/destructiveChangesPre.xml"
-          temp_input="./.github/temp/changed_metadata.txt"
-          mkdir -p ./.github/temp
-          rm -f "$temp_manifest" "$temp_destructive" "$temp_input"
+          sf sgd:source:delta \
+            --to "HEAD" \
+            --from "$DELTA_FROM_COMMIT" \
+            --output-dir "." \
+            --source-dir force-app/
 
-          declare -A typeMembers
+      - name: Display generated packages
+        run: |
+          set -euo pipefail
+          echo "===== package/package.xml ====="
+          cat package/package.xml 2>/dev/null || echo "(not generated)"
+          echo
+          echo "===== destructiveChanges/destructiveChanges.xml ====="
+          cat destructiveChanges/destructiveChanges.xml 2>/dev/null || echo "(not generated)"
 
-          add_member() {
-            type="$1"; member="$2"
-            if [ -z "${typeMembers[$type]}" ]; then
-              typeMembers[$type]="$member"
-            else
-              existing="${typeMembers[$type]}"
-              if ! echo "$existing" | grep -qx "$member"; then
-                typeMembers[$type]="$existing\n$member"
-              fi
-            fi
-          }
+      - name: Upload delta artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: salesforce-delta-validation
+          path: |
+            package/package.xml
+            destructiveChanges/destructiveChanges.xml
+          if-no-files-found: warn
+          retention-days: 7
 
-          get_api_name() {
-            file_path="$1"
-            rel="$2"
+      - name: Compute Apex delta and infer tests
+        id: delta
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
 
-            # If the file contains <fullName>, prefer that as API name
-            if [ -f "$file_path" ] && grep -q '<fullName>' "$file_path" 2>/dev/null; then
-              fullName=$(grep -oPm1 '(?<=<fullName>)[^<]+' "$file_path" 2>/dev/null || true)
-              [ -n "$fullName" ] && echo "$fullName" && return
-            fi
+          changed_files=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" 2>/dev/null || git diff --name-only HEAD~1 HEAD)
 
-            case "$rel" in
-              classes/*.cls|classes/*.cls-meta.xml)
-                echo "$(basename "$rel" .cls)" ;;
-              triggers/*.trigger|triggers/*.trigger-meta.xml)
-                echo "$(basename "$rel" .trigger)" ;;
-              pages/*.page|pages/*.page-meta.xml)
-                echo "$(basename "$rel" .page)" ;;
-              components/*.component|components/*.component-meta.xml)
-                echo "$(basename "$rel" .component)" ;;
-              aura/*/*)
-                echo "$(echo "$rel" | cut -d'/' -f2)" ;;
-              lwc/*/*)
-                echo "$(echo "$rel" | cut -d'/' -f2)" ;;
-              objects/*.object|objects/*.object-meta.xml)
-                echo "$(basename "$rel" .object)" ;;
-              objects/*/object/*|objects/*/*.object)
-                echo "$(echo "$rel" | cut -d'/' -f2)" ;;
-              permissionsets/*.permissionset|permissionsets/*.permissionset-meta.xml)
-                echo "$(basename "$rel" .permissionset)" ;;
-              profiles/*.profile|profiles/*.profile-meta.xml)
-                echo "$(basename "$rel" .profile)" ;;
-              staticresources/*.resource|staticresources/*.resource-meta.xml)
-                echo "$(basename "$rel" .resource)" ;;
-              labels/*.labels|labels/*.labels-meta.xml)
-                echo "CustomLabels" ;;
-              flows/*.flow|flows/*.flow-meta.xml)
-                echo "$(basename "$rel" .flow)" ;;
-              datacategorygroups/*.datacategorygroup|datacategorygroups/*.datacategorygroup-meta.xml)
-                echo "$(basename "$rel" .datacategorygroup)" ;;
-              * )
-                echo "$(basename "${rel%.*}")" ;;
-            esac
-          }
+          has_apex=false
+          if [[ -f package/package.xml ]] && grep -qE '<name>ApexClass|ApexTrigger</name>' package/package.xml; then
+            has_apex=true
+          fi
 
-          normalized=
-          while IFS= read -r file; do
-            [ -z "$file" ] && continue
-            if [[ ! "$file" =~ ^force-app/main/default/ ]]; then
-              continue
-            fi
-            rel=${file#force-app/main/default/}
-            meta=""
-            fullname=""
-            case "$rel" in
-              classes/*)
-                meta="ApexClass" ;;
-              triggers/*)
-                meta="ApexTrigger" ;;
-              pages/*)
-                meta="ApexPage" ;;
-              components/*)
-                meta="ApexComponent" ;;
-              aura/*/*)
-                meta="AuraDefinitionBundle" ;;
-              lwc/*/*)
-                meta="LightningComponentBundle" ;;
-              objects/*.object|objects/*.object-meta.xml|objects/*/object/*|objects/*/*.object)
-                meta="CustomObject" ;;
-              permissionsets/*)
-                meta="PermissionSet" ;;
-              profiles/*)
-                meta="Profile" ;;
-              staticresources/*)
-                meta="StaticResource" ;;
-              labels/*)
-                meta="CustomLabels" ;;
-              flows/*)
-                meta="Flow" ;;
-              datacategorygroups/*)
-                meta="DataCategoryGroup" ;;
-              * )
-                folder=$(echo "$rel" | cut -d'/' -f1)
-                meta=${folder^}
-                ;;
-            esac
-
-            # Prefer the metadata fullName if present for API compatibility
-            file_path="./$file"
-            if [[ "$rel" == *-meta.xml ]]; then
-              base_file="$file"
-            else
-              base_file="$file"
-            fi
-            fullname=$(get_api_name "$file_path" "$rel")
-
-            if [ -n "$meta" ] && [ -n "$fullname" ]; then
-              add_member "$meta" "$fullname"
-            fi
-          done <<< "$changed_files"
-
-          # deleted apex etc for destructive package
-          apex_deleted_files=$(echo "$changed_status" | awk '/^D[[:space:]]+force-app\/main\/default\/.*\.(cls|cls-meta.xml)$/ {print $2}' || true)
           apex_changed_classes=""
           while IFS= read -r file; do
-            if [[ "$file" =~ ^force-app/main/default/classes/.*\.cls$ ]]; then
-              className=$(basename "$file" .cls)
-              if [ -z "$apex_changed_classes" ]; then
-                apex_changed_classes="$className"
-              else
-                case ",${apex_changed_classes}," in
-                  *,${className},*) ;;
-                  *) apex_changed_classes+=",$className" ;;
-                esac
-              fi
-            fi
+            [[ "$file" =~ ^force-app/main/default/classes/.*\.cls$ ]] || continue
+            [[ "$file" =~ (Test|Tests)\.cls$ ]] && continue
+            class_name=$(basename "$file" .cls)
+            case ",${apex_changed_classes}," in
+              *,"$class_name",*) ;;
+              *) apex_changed_classes="${apex_changed_classes:+${apex_changed_classes},}$class_name" ;;
+            esac
           done <<< "$changed_files"
 
-          if [ -n "$apex_deleted_files" ]; then
-            for f in $apex_deleted_files; do
-              deleted_rel=${f#force-app/main/default/}
-              if [[ "$deleted_rel" =~ ^classes/ ]]; then
-                dname=$(basename "$deleted_rel" .cls)
-                add_member "ApexClass" "$dname"
-                if [ -z "$apex_changed_classes" ]; then
-                  apex_changed_classes="$dname"
-                else
-                  case ",${apex_changed_classes}," in
-                    *,${dname},*) ;;
-                    *) apex_changed_classes+=",$dname" ;;
+          changed_test_classes=""
+          while IFS= read -r file; do
+            [[ "$file" =~ ^force-app/main/default/classes/.*(Test|Tests)\.cls$ ]] || continue
+            class_name=$(basename "$file" .cls)
+            case ",${changed_test_classes}," in
+              *,"$class_name",*) ;;
+              *) changed_test_classes="${changed_test_classes:+${changed_test_classes},}$class_name" ;;
+            esac
+          done <<< "$changed_files"
+
+          inferred_test_classes="$changed_test_classes"
+          if [[ -n "$apex_changed_classes" ]]; then
+            for class_name in $(echo "$apex_changed_classes" | tr ',' ' '); do
+              for suffix in Test Tests TestClass; do
+                candidate="${class_name}${suffix}"
+                if [[ -f "force-app/main/default/classes/${candidate}.cls" ]] || echo ",$changed_test_classes," | grep -q ",${candidate},"; then
+                  case ",${inferred_test_classes}," in
+                    *,"$candidate",*) ;;
+                    *) inferred_test_classes="${inferred_test_classes:+${inferred_test_classes},}$candidate" ;;
                   esac
                 fi
-              fi
-            done
-          fi
-
-          echo "apex_changed_classes=$apex_changed_classes" >> $GITHUB_OUTPUT
-
-          # write package manifest for all collected metadata types
-          if [ ${#typeMembers[@]} -gt 0 ]; then
-            echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" > "$temp_manifest"
-            echo "<Package xmlns=\"http://soap.sforce.com/2006/04/metadata\">" >> "$temp_manifest"
-            for key in "${!typeMembers[@]}"; do
-              printf "  <types>\n" >> "$temp_manifest"
-              echo -e "${typeMembers[$key]}" | sort -u | while IFS= read -r member; do
-                [ -z "$member" ] && continue
-                echo "    <members>$member</members>" >> "$temp_manifest"
               done
-              echo "    <name>$key</name>" >> "$temp_manifest"
-              echo "  </types>" >> "$temp_manifest"
             done
-            echo "  <version>56.0</version>" >> "$temp_manifest"
-            echo "</Package>" >> "$temp_manifest"
-            echo "deploy_manifest=$temp_manifest" >> $GITHUB_OUTPUT
-            echo "Delta package.xml contents:"; cat "$temp_manifest"
           fi
 
-          # destructive package for deleted metadata
-          if [ -n "$apex_deleted_files" ]; then
-            # we only built ApexClass deletes above; in future can add other types
-            echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" > "$temp_destructive"
-            echo "<Package xmlns=\"http://soap.sforce.com/2006/04/metadata\">" >> "$temp_destructive"
-            echo "  <types>" >> "$temp_destructive"
-            echo "    <name>ApexClass</name>" >> "$temp_destructive"
-            echo "  </types>" >> "$temp_destructive"
-            echo "  <version>56.0</version>" >> "$temp_destructive"
-            echo "</Package>" >> "$temp_destructive"
-            echo "destructive_manifest=$temp_destructive" >> $GITHUB_OUTPUT
-            echo "Destructive package.xml content:"; cat "$temp_destructive"
+          deploy_manifest=""
+          if [[ -f package/package.xml ]] && grep -q '<members>' package/package.xml; then
+            deploy_manifest="package/package.xml"
           fi
 
-          if [ ${#typeMembers[@]} -gt 0 ] || [ "$has_apex_in_package" = "true" ]; then
-            echo "apex_required=true" >> $GITHUB_OUTPUT
+          destructive_manifest=""
+          if [[ -f destructiveChanges/destructiveChanges.xml ]] && grep -q '<members>' destructiveChanges/destructiveChanges.xml; then
+            destructive_manifest="destructiveChanges/destructiveChanges.xml"
+          fi
+
+          if [[ "$has_apex" == "true" || -n "$apex_changed_classes" ]]; then
+            apex_required=true
           else
-            echo "apex_required=false" >> $GITHUB_OUTPUT
+            apex_required=false
           fi
 
-          if [ "${{ steps.set-test-classes.outputs.test_level }}" = "RunSpecifiedTests" ]; then
-            echo "tests_required=true" >> $GITHUB_OUTPUT
-          else
-            echo "tests_required=false" >> $GITHUB_OUTPUT
-          fi
+          echo "inferred_test_classes=$inferred_test_classes" >> "$GITHUB_OUTPUT"
+          echo "deploy_manifest=$deploy_manifest" >> "$GITHUB_OUTPUT"
+          echo "destructive_manifest=$destructive_manifest" >> "$GITHUB_OUTPUT"
+          echo "apex_required=$apex_required" >> "$GITHUB_OUTPUT"
 
       - name: Validate test requirements
+        env:
+          APEX_REQUIRED: ${{ steps.delta.outputs.apex_required }}
+          TEST_LEVEL: ${{ steps.pr-tests.outputs.test_level }}
+          INFERRED_TESTS: ${{ steps.delta.outputs.inferred_test_classes }}
         run: |
-          apex_required="${{ steps.delta-tests.outputs.apex_required }}"
-          tests_required="${{ steps.delta-tests.outputs.tests_required }}"
-          test_level="${{ steps.set-test-classes.outputs.test_level }}"
-          apex_changed_classes="${{ steps.delta-tests.outputs.apex_changed_classes }}"
-
-          if [ "$apex_required" = "true" ] && [ "$test_level" != "RunSpecifiedTests" ]; then
-            echo "ERROR: Apex classes changed but no test classes were specified in PR comments."
-            echo "Changed Apex classes in this PR: $apex_changed_classes"
-            echo "To fix: edit the PR description and add a line like:"
-            echo "  tests: MyFirstTestClass, MySecondTestClass"
-            echo "If you already have test classes names, just comma-separated list them there."
-            echo "Next steps:"
-            echo "1) Update PR description as above."
-            echo "2) Push an updated commit or reopen the PR."
-            echo "3) Wait for the workflow to rerun and confirm coverage >= 85%."
-            echo "4) If coverage is still below threshold, add or extend test methods for the changed Apex classes."
+          set -euo pipefail
+          if [[ "$APEX_REQUIRED" == "true" && "$TEST_LEVEL" != "RunSpecifiedTests" && -z "$INFERRED_TESTS" ]]; then
+            echo "::error::Apex changed but no tests were specified or inferred."
             exit 1
           fi
 
-      - name: Run check-only deploy to UAT org
+      - name: Validate deploy to target org
+        env:
+          APEX_REQUIRED: ${{ steps.delta.outputs.apex_required }}
+          PR_TEST_CLASSES: ${{ steps.pr-tests.outputs.test_classes }}
+          INFERRED_TEST_CLASSES: ${{ steps.delta.outputs.inferred_test_classes }}
+          DEPLOY_MANIFEST: ${{ steps.delta.outputs.deploy_manifest }}
+          DESTRUCTIVE_MANIFEST: ${{ steps.delta.outputs.destructive_manifest }}
         run: |
-          apex_required="${{ steps.delta-tests.outputs.apex_required }}"
-          test_level="${{ steps.set-test-classes.outputs.test_level }}"
-          test_classes="${{ steps.set-test-classes.outputs.test_classes }}"
-          manifest_path="${{ steps.delta-tests.outputs.deploy_manifest }}"
-          destructive_path="${{ steps.delta-tests.outputs.destructive_manifest }}"
+          set -euo pipefail
 
-          deploy_cmd="sfdx force:source:deploy -u uat --checkonly --verbose --json"
+          all_test_classes=$(
+            printf '%s\n%s\n' \
+              "$(echo "${PR_TEST_CLASSES:-}" | tr ',' '\n')" \
+              "$(echo "${INFERRED_TEST_CLASSES:-}" | tr ',' '\n')" \
+            | sed '/^[[:space:]]*$/d' | awk '!seen[$0]++' | paste -sd ',' -
+          )
 
-          if [ -n "$manifest_path" ]; then
-            echo "Using generated manifest for changed Apex metadata: $manifest_path"
-            cat "$manifest_path"
-            deploy_cmd="$deploy_cmd --manifest $manifest_path"
+          deploy_cmd=(sf project deploy validate --target-org "$ORG_ALIAS" --json)
+
+          if [[ -n "${DEPLOY_MANIFEST:-}" ]]; then
+            deploy_cmd+=(--manifest "$DEPLOY_MANIFEST")
           else
-            echo "No changed Apex classes found in delta manifest; defaulting to full force-app deployment";
-            deploy_cmd="$deploy_cmd -p force-app/main/default"
+            deploy_cmd+=(--source-dir "$SOURCE_DIR")
           fi
 
-          if [ -n "$destructive_path" ]; then
-            echo "Including destructive changes manifest: $destructive_path"
-            deploy_cmd="$deploy_cmd -x $destructive_path"
+          if [[ -n "${DESTRUCTIVE_MANIFEST:-}" ]]; then
+            deploy_cmd+=(--post-destructive-changes "$DESTRUCTIVE_MANIFEST")
           fi
 
-          if [ "$apex_required" != "true" ]; then
-            echo "No Apex class changes required; using NoTestRun"
-            deploy_cmd="$deploy_cmd --testlevel NoTestRun"
-          elif [ "$test_level" = "RunSpecifiedTests" ] && [ -n "$test_classes" ]; then
-            echo "Apex changes with requested tests: $test_classes"
-            deploy_cmd="$deploy_cmd --testlevel RunSpecifiedTests --runtests $test_classes"
+          if [[ -n "${all_test_classes:-}" ]]; then
+            deploy_cmd+=(--test-level RunSpecifiedTests)
+            while IFS= read -r test_class; do
+              [[ -z "$test_class" ]] && continue
+              deploy_cmd+=(--tests "$(echo "$test_class" | xargs)")
+            done <<< "$(echo "$all_test_classes" | tr ',' '\n')"
+          elif [[ "$APEX_REQUIRED" == "true" ]]; then
+            echo "::error::Apex changed but no tests were specified or inferred."
+            exit 1
           else
-            echo "Apex classes changed but no test classes specified in PR comments. Please update the PR with tests."
+            deploy_cmd+=(--test-level NoTestRun)
+          fi
+
+          set +e
+          "${deploy_cmd[@]}" > deploy-output.json 2>deploy-stderr.log
+          rc=$?
+          set -e
+
+          if [[ $rc -ne 0 ]]; then
+            echo "::error::Deploy validation failed (exit $rc)."
+            echo "--- stderr ---"
+            cat deploy-stderr.log || true
+            echo "--- status / message ---"
+            jq -r '"Status: \(.status // "n/a")  Message: \(.message // "n/a")"' deploy-output.json 2>/dev/null || cat deploy-output.json
+            echo "--- component failures ---"
+            jq -r '.result.details.componentFailures[]? | "[\(.componentType)] \(.fileName): \(.problem)"' deploy-output.json 2>/dev/null || true
+            echo "--- test failures ---"
+            jq -r '.result.details.runTestResult.failures[]? | "\(.name).\(.methodName): \(.message)"' deploy-output.json 2>/dev/null || true
+            echo "--- coverage warnings ---"
+            jq -r '.result.details.runTestResult.codeCoverageWarnings[]? | .message' deploy-output.json 2>/dev/null || true
             exit 1
           fi
 
-          echo "Final deploy command: $deploy_cmd"
-          eval "$deploy_cmd" > deploy-output.json
-
-      - name: Check coverage from deploy results
+      - name: Check Apex test coverage
         run: |
-          apex_required="${{ steps.delta-tests.outputs.apex_required }}"
-
-          if [ "$apex_required" != "true" ]; then
-            echo "No Apex tests run; coverage check skipped."
+          set -euo pipefail
+          if [[ "${{ steps.delta.outputs.apex_required }}" != "true" ]]; then
+            echo "No Apex changes; coverage check skipped."
             exit 0
           fi
 
-          coverage=$(jq -r '.result.details.runTestResult.codeCoverage | if type=="object" then .coveragePercent // .overallCoverage else empty end' deploy-output.json 2>/dev/null || true)
+          [[ -f deploy-output.json ]] || { echo "::error::deploy-output.json not found."; exit 1; }
 
-          if [ -z "$coverage" ] || [ "$coverage" = "null" ]; then
-            echo "Could not determine coverage from deploy output; failing for safety."
+          total=$(jq '[.result.details.runTestResult.codeCoverage[]?.numLocations // 0] | add // 0' deploy-output.json 2>/dev/null || echo 0)
+          uncovered=$(jq '[.result.details.runTestResult.codeCoverage[]?.numLocationsNotCovered // 0] | add // 0' deploy-output.json 2>/dev/null || echo 0)
+
+          total=${total:-0}; total=${total//null/0}
+          uncovered=${uncovered:-0}; uncovered=${uncovered//null/0}
+
+          if [[ "$total" -le 0 ]]; then
+            echo "::error::Cannot determine coverage from deploy output."
             exit 1
           fi
 
-          echo "Test coverage: $coverage%"
-          required=85
-          exceed=$(echo "$coverage >= $required" | bc -l)
-          if [ "$exceed" -ne 1 ]; then
-            echo "Test coverage $coverage% is below required $required%";
+          covered=$(( total - uncovered ))
+          coverage=$(awk -v c="$covered" -v t="$total" 'BEGIN { printf "%.2f", (c/t)*100 }')
+          below=$(awk -v cov="$coverage" -v req="$COVERAGE_THRESHOLD" 'BEGIN { print (cov+0 < req+0) ? 1 : 0 }')
+
+          echo "Coverage: $covered / $total lines = $coverage%"
+          if [[ "$below" -eq 1 ]]; then
+            echo "::error::Coverage $coverage% is below required ${COVERAGE_THRESHOLD}%."
             exit 1
           fi
 
-      - name: Install Salesforce Scanner CLI
-        run: npm install -g @salesforce/sfdx-scanner
+      - name: Install Salesforce Code Analyzer
+        run: echo y | sf plugins install @salesforce/sfdx-scanner || npm install -g @salesforce/sfdx-scanner
 
-      - name: Run Salesforce code analyzer (PMD)
+      - name: Run Salesforce Code Analyzer
         run: |
-          sfdx scanner:run --target force-app/main/default --engine pmd --format json --out scanner-report.json
-          cat scanner-report.json
+          set -euo pipefail
+          sf scanner run \
+            --target "$SOURCE_DIR" \
+            --format csv \
+            --outfile scanner-report.csv || true
 
-      - name: Upload scanner report artifact
+          echo "===== Scanner Report (first 100 lines) ====="
+          head -100 scanner-report.csv 2>/dev/null || echo "(no findings)"
+
+      - name: Upload Salesforce analyzer CSV
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scanner-report
-          path: scanner-report.json
+          name: salesforce-code-analyzer-csv
+          path: scanner-report.csv
+          if-no-files-found: warn
+          retention-days: 7
+
+  sca-sast-stage:
+    name: SCA/SAST Stage
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    needs: [salesforce-validation]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run dependency SCA gate
+        run: |
+          set -euo pipefail
+          if [[ -f package-lock.json ]]; then
+            npm ci
+          else
+            npm install
+          fi
+          npm audit --audit-level=high
+
+  checkmarx-sast:
+    name: CheckMarx AST Scan
+    if: ${{ github.event_name != 'pull_request_review' && needs.setup.outputs.run-checkmarx == 'true' && needs.sca-sast-stage.result == 'success' }}
+    needs: [setup, sca-sast-stage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run CheckMarx AST Scan
+        uses: Checkmarx/ast-github-action@2.3.33
+        with:
+          base_uri: ${{ secrets.CX_BASE_URI }}
+          cx_tenant: ${{ secrets.CX_TENANT }}
+          cx_client_id: ${{ secrets.CX_CLIENT_ID }}
+          cx_client_secret: ${{ secrets.CX_CLIENT_SECRET }}
+          project_name: ${{ secrets.CX_PROJECT_NAME || github.event.repository.name }}
+          additional_params: --scan-types sast,kics --report-format sarif --output-path . --output-name cx_result
+
+      - name: Upload CheckMarx SARIF report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkmarx-sarif-report
+          path: cx_result.sarif
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload CheckMarx results to GitHub Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: cx_result.sarif
+          category: checkmarx
+
+  fortify-sast-dast:
+    name: Fortify on Demand Scan
+    if: ${{ github.event_name != 'pull_request_review' && needs.setup.outputs.run-fortify == 'true' && needs.sca-sast-stage.result == 'success' }}
+    needs: [setup, sca-sast-stage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      HAS_DAST_URL: ${{ secrets.FOD_DAST_SCAN_URL != '' }}
+      FOD_URL: ${{ vars.FOD_URL }}
+      FOD_RELEASE: ${{ secrets.FOD_APP_NAME }}:${{ secrets.FOD_RELEASE_NAME }}
+      FOD_DAST_ASSESSMENT_TYPE: ${{ vars.FOD_DAST_ASSESSMENT_TYPE || 'Dynamic Assessment' }}
+      FOD_DAST_FREQUENCY: ${{ vars.FOD_DAST_FREQUENCY || 'SingleScan' }}
+      FOD_DAST_ENVIRONMENT: ${{ vars.FOD_DAST_ENVIRONMENT || 'External' }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Fortify SAST Scan
+        uses: fortify/github-action@v3
+        env:
+          FOD_URL: ${{ vars.FOD_URL }}
+          FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
+          FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
+          FOD_RELEASE: ${{ secrets.FOD_APP_NAME }}:${{ secrets.FOD_RELEASE_NAME }}
+          SOURCE_DIR: ${{ env.SOURCE_DIR }}
+          DO_SAST_EXPORT: true
+          FCLI_BOOTSTRAP_VERSION: ${{ env.FCLI_BOOTSTRAP_VERSION }}
+
+      - name: Upload Fortify SAST SARIF report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortify-sast-sarif-report
+          path: gh-fortify-sast.sarif
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload Fortify SAST results to GitHub Code Scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gh-fortify-sast.sarif
+          category: fortify-sast
+
+      - name: Setup Fortify tools for DAST
+        if: env.HAS_DAST_URL == 'true'
+        uses: fortify/github-action/setup@v3
+        with:
+          fcli: bootstrapped
+          fod-uploader: latest
+        env:
+          FCLI_BOOTSTRAP_VERSION: ${{ env.FCLI_BOOTSTRAP_VERSION }}
+
+      - name: Run Fortify DAST Scan (custom fcli flow)
+        if: env.HAS_DAST_URL == 'true'
+        env:
+          FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
+          FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
+          FOD_DAST_SCAN_URL: ${{ secrets.FOD_DAST_SCAN_URL }}
+        run: |
+          set -euo pipefail
+
+          fcli fod session login \
+            --url "$FOD_URL" \
+            --client-id "$FOD_CLIENT_ID" \
+            --client-secret "$FOD_CLIENT_SECRET"
+
+          fcli fod dast-scan setup-website \
+            --rel "$FOD_RELEASE" \
+            --assessment-type "$FOD_DAST_ASSESSMENT_TYPE" \
+            --frequency "$FOD_DAST_FREQUENCY" \
+            --environment "$FOD_DAST_ENVIRONMENT" \
+            --url "$FOD_DAST_SCAN_URL" \
+            --skip-if-exists
+
+          fcli fod dast-scan start \
+            --rel "$FOD_RELEASE" \
+            --in-progress Queue \
+            --max-attempts 180 \
+            --wait-interval 30
+
+          fcli fod dast-scan download-latest \
+            --rel "$FOD_RELEASE" \
+            -f fortify-dast-results.fpr
+
+          cat > gh-fortify-dast.sarif <<'EOF'
+          {
+            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [
+              {
+                "tool": {
+                  "driver": {
+                    "name": "Fortify FoD DAST",
+                    "rules": [
+                      {
+                        "id": "fortify-dast-results",
+                        "name": "Fortify DAST results available"
+                      }
+                    ]
+                  }
+                },
+                "results": [
+                  {
+                    "ruleId": "fortify-dast-results",
+                    "level": "note",
+                    "message": {
+                      "text": "Fortify DAST scan completed. Review fortify-dast-results.fpr artifact for full details."
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+          EOF
+
+          fcli fod session logout || true
+
+      - name: Upload Fortify DAST FPR artifact
+        if: env.HAS_DAST_URL == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortify-dast-fpr-report
+          path: fortify-dast-results.fpr
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload Fortify DAST SARIF report
+        if: env.HAS_DAST_URL == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortify-dast-sarif-report
+          path: gh-fortify-dast.sarif
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload Fortify DAST results to GitHub Code Scanning
+        if: env.HAS_DAST_URL == 'true'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gh-fortify-dast.sarif
+          category: fortify-dast
+
+  approval-merge-gate:
+    name: Approval + Merge Gate
+    if: ${{ github.event_name == 'pull_request_review' && github.event.review.state == 'approved' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    outputs:
+      merge_commit_sha: ${{ steps.merge.outputs.merge_commit_sha }}
+      merged: ${{ steps.merge.outputs.merged }}
+    steps:
+      - name: Validate approval freshness and required checks
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_COMMIT: ${{ github.event.review.commit_id }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$REVIEW_COMMIT" != "$HEAD_SHA" ]]; then
+            echo "::error::Stale approval. Review commit does not match latest PR head SHA."
+            exit 1
+          fi
+
+          checks_json=$(gh api -H "Accept: application/vnd.github+json" \
+            "repos/$REPO/commits/$HEAD_SHA/check-runs")
+
+          required_checks=(
+            "Salesforce PR validation"
+            "SCA/SAST Stage"
+          )
+
+          if [[ "${{ secrets.CX_CLIENT_SECRET != '' }}" == "true" ]]; then
+            required_checks+=("CheckMarx AST Scan")
+          fi
+
+          if [[ "${{ secrets.FOD_CLIENT_SECRET != '' }}" == "true" ]]; then
+            required_checks+=("Fortify on Demand Scan")
+          fi
+
+          for check_name in "${required_checks[@]}"; do
+            # Count check runs that completed successfully (any run, not just the latest).
+            # This is necessary because when pull_request_review fires, jobs skipped by
+            # their `if:` conditions produce new check-run entries with conclusion=skipped,
+            # which would shadow the earlier successful run on the same SHA.
+            success_count=$(echo "$checks_json" | jq \
+              --arg n "$check_name" \
+              '[.check_runs[] | select(.name == $n and .status == "completed" and .conclusion == "success")] | length')
+
+            if [[ "$success_count" == "0" ]]; then
+              # Surface the most recent non-success entry for a useful error message.
+              last_status=$(echo "$checks_json" | jq -r --arg n "$check_name" \
+                '[.check_runs[] | select(.name == $n)] | sort_by(.started_at) | last | "\(.status)/\(.conclusion)"' 2>/dev/null || echo "not found")
+              echo "::error::Required check '$check_name' has no successful run on commit $HEAD_SHA (last seen: $last_status)."
+              exit 1
+            fi
+          done
+
+      - name: Merge pull request with merge commit
+        id: merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          result=$(gh api \
+            --method PUT \
+            -H "Accept: application/vnd.github+json" \
+            "repos/$REPO/pulls/$PR_NUMBER/merge" \
+            -f merge_method='merge' \
+            -f sha="$HEAD_SHA")
+
+          merged=$(echo "$result" | jq -r '.merged')
+          merge_sha=$(echo "$result" | jq -r '.sha')
+
+          if [[ "$merged" != "true" || -z "$merge_sha" || "$merge_sha" == "null" ]]; then
+            echo "::error::PR merge failed."
+            echo "$result"
+            exit 1
+          fi
+
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+          echo "merge_commit_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+
+  deploy-after-merge:
+    name: Deploy merged commit to target org
+    if: ${{ github.event_name == 'pull_request_review' && needs.approval-merge-gate.outputs.merged == 'true' }}
+    needs: approval-merge-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Checkout merged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.approval-merge-gate.outputs.merge_commit_sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install npm dependencies
+        run: |
+          set -euo pipefail
+          if [[ -f package-lock.json ]]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Install Salesforce CLI
+        run: npm install --global @salesforce/cli
+
+      - name: Authenticate target org
+        env:
+          SFDX_AUTH_URL: ${{ secrets[env.SFDX_AUTH_SECRET_NAME] }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${SFDX_AUTH_URL:-}" ]]; then
+            echo "::error::Required auth URL secret '$SFDX_AUTH_SECRET_NAME' is missing or empty."
+            exit 1
+          fi
+
+          printf '%s' "$SFDX_AUTH_URL" > sfdxAuthUrl.txt
+          sf org login sfdx-url --sfdx-url-file sfdxAuthUrl.txt --alias "$ORG_ALIAS"
+          rm -f sfdxAuthUrl.txt
+
+      - name: Install sfdx-git-delta plugin
+        run: |
+          set -euo pipefail
+          echo y | sf plugins install sfdx-git-delta || npm install -g sfdx-git-delta@latest
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Build delta package from merged commit
+        env:
+          DELTA_FROM_COMMIT: ${{ vars[env.DELTA_FROM_COMMIT_VAR] }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${DELTA_FROM_COMMIT:-}" ]]; then
+            echo "::error::Required repository variable '$DELTA_FROM_COMMIT_VAR' is missing or empty."
+            exit 1
+          fi
+
+          sf sgd:source:delta \
+            --to "HEAD" \
+            --from "$DELTA_FROM_COMMIT" \
+            --output-dir "." \
+            --source-dir force-app/
+
+      - name: Display generated packages
+        run: |
+          set -euo pipefail
+          echo "===== package/package.xml ====="
+          cat package/package.xml 2>/dev/null || echo "(not generated)"
+          echo
+          echo "===== destructiveChanges/destructiveChanges.xml ====="
+          cat destructiveChanges/destructiveChanges.xml 2>/dev/null || echo "(not generated)"
+
+      - name: Upload delta artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: salesforce-delta-merged-deploy
+          path: |
+            package/package.xml
+            destructiveChanges/destructiveChanges.xml
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Build test class set
+        id: tests
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          changed_files=$(git diff --name-only HEAD^ HEAD)
+
+          apex_changed_classes=""
+          changed_test_classes=""
+
+          while IFS= read -r file; do
+            [[ "$file" =~ ^force-app/main/default/classes/.*\.cls$ ]] || continue
+            class_name=$(basename "$file" .cls)
+            if [[ "$file" =~ (Test|Tests)\.cls$ ]]; then
+              case ",${changed_test_classes}," in
+                *,"$class_name",*) ;;
+                *) changed_test_classes="${changed_test_classes:+${changed_test_classes},}$class_name" ;;
+              esac
+              continue
+            fi
+            case ",${apex_changed_classes}," in
+              *,"$class_name",*) ;;
+              *) apex_changed_classes="${apex_changed_classes:+${apex_changed_classes},}$class_name" ;;
+            esac
+          done <<< "$changed_files"
+
+          comments=$(gh api \
+            "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments" \
+            --jq '.[].body' 2>/dev/null || echo "")
+
+          full_text="$PR_BODY
+          $comments"
+          line=$(echo "$full_text" | grep -iE '^\s*(tests?(\s+classes?)?)\s*:' | head -1 || true)
+          pr_test_classes=$(echo "$line" | sed 's/^[^:]*:[[:space:]]*//' | tr ',' '\n' | xargs -n1 | paste -sd ',' -)
+
+          inferred_test_classes="$changed_test_classes"
+          if [[ -n "$apex_changed_classes" ]]; then
+            for class_name in $(echo "$apex_changed_classes" | tr ',' ' '); do
+              for suffix in Test Tests TestClass; do
+                candidate="${class_name}${suffix}"
+                if [[ -f "force-app/main/default/classes/${candidate}.cls" ]] || echo ",$changed_test_classes," | grep -q ",${candidate},"; then
+                  case ",${inferred_test_classes}," in
+                    *,"$candidate",*) ;;
+                    *) inferred_test_classes="${inferred_test_classes:+${inferred_test_classes},}$candidate" ;;
+                  esac
+                fi
+              done
+            done
+          fi
+
+          all_test_classes=$(
+            printf '%s\n%s\n' "${pr_test_classes:-}" "${inferred_test_classes:-}" \
+            | tr ',' '\n' \
+            | sed '/^[[:space:]]*$/d' \
+            | awk '!seen[$0]++' \
+            | paste -sd ',' -
+          )
+
+          has_apex=false
+          if [[ -f package/package.xml ]] && grep -qE '<name>ApexClass|ApexTrigger</name>' package/package.xml; then
+            has_apex=true
+          fi
+          if [[ -n "$apex_changed_classes" ]]; then
+            has_apex=true
+          fi
+
+          deploy_manifest=""
+          if [[ -f package/package.xml ]] && grep -q '<members>' package/package.xml; then
+            deploy_manifest="package/package.xml"
+          fi
+
+          destructive_manifest=""
+          if [[ -f destructiveChanges/destructiveChanges.xml ]] && grep -q '<members>' destructiveChanges/destructiveChanges.xml; then
+            destructive_manifest="destructiveChanges/destructiveChanges.xml"
+          fi
+
+          if [[ "$has_apex" == "true" && -z "${all_test_classes:-}" ]]; then
+            echo "::error::Apex changed but no tests specified or inferred for merged deployment."
+            exit 1
+          fi
+
+          echo "all_test_classes=${all_test_classes:-}" >> "$GITHUB_OUTPUT"
+          echo "has_apex=$has_apex" >> "$GITHUB_OUTPUT"
+          echo "deploy_manifest=$deploy_manifest" >> "$GITHUB_OUTPUT"
+          echo "destructive_manifest=$destructive_manifest" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy merged changes to target org
+        env:
+          HAS_APEX: ${{ steps.tests.outputs.has_apex }}
+          ALL_TEST_CLASSES: ${{ steps.tests.outputs.all_test_classes }}
+          DEPLOY_MANIFEST: ${{ steps.tests.outputs.deploy_manifest }}
+          DESTRUCTIVE_MANIFEST: ${{ steps.tests.outputs.destructive_manifest }}
+        run: |
+          set -euo pipefail
+
+          deploy_cmd=(sf project deploy start --target-org "$ORG_ALIAS" --wait 60 --json)
+
+          if [[ -n "${DEPLOY_MANIFEST:-}" ]]; then
+            deploy_cmd+=(--manifest "$DEPLOY_MANIFEST")
+          else
+            deploy_cmd+=(--source-dir "$SOURCE_DIR")
+          fi
+
+          if [[ -n "${DESTRUCTIVE_MANIFEST:-}" ]]; then
+            deploy_cmd+=(--post-destructive-changes "$DESTRUCTIVE_MANIFEST")
+          fi
+
+          if [[ "$HAS_APEX" == "true" ]]; then
+            deploy_cmd+=(--test-level RunSpecifiedTests)
+            while IFS= read -r test_class; do
+              [[ -z "$test_class" ]] && continue
+              deploy_cmd+=(--tests "$(echo "$test_class" | xargs)")
+            done <<< "$(echo "$ALL_TEST_CLASSES" | tr ',' '\n')"
+          else
+            deploy_cmd+=(--test-level NoTestRun)
+          fi
+
+          set +e
+          "${deploy_cmd[@]}" > deploy-output.json 2>deploy-stderr.log
+          rc=$?
+          set -e
+
+          if [[ $rc -ne 0 ]]; then
+            echo "::error::Deployment failed (exit $rc)."
+            echo "--- stderr ---"
+            cat deploy-stderr.log || true
+            echo "--- status / message ---"
+            jq -r '"Status: \(.status // "n/a")  Message: \(.message // "n/a")"' deploy-output.json 2>/dev/null || cat deploy-output.json
+            echo "--- component failures ---"
+            jq -r '.result.details.componentFailures[]? | "[\(.componentType)] \(.fileName): \(.problem)"' deploy-output.json 2>/dev/null || true
+            echo "--- test failures ---"
+            jq -r '.result.details.runTestResult.failures[]? | "\(.name).\(.methodName): \(.message)"' deploy-output.json 2>/dev/null || true
+            echo "--- coverage warnings ---"
+            jq -r '.result.details.runTestResult.codeCoverageWarnings[]? | .message' deploy-output.json 2>/dev/null || true
+            exit 1
+          fi
