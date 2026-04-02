@@ -5,7 +5,7 @@ Setup Browser
     # set envirionment variables
     Initialize Environment Variables                        ${ENVIRONMENT}
     Set Library Search Order    QForce                      QWeb
-    Open Browser                about:blank                 ${BROWSER}
+    Open Browser                about:blank                 ${Open Browser}
     SetConfig                   LineBreak                   ${EMPTY}                    #\ue000
     Evaluate                    random.seed()               random                      # initialize random generator
     SetConfig                   DefaultTimeout              50s                         #45s                        #sometimes salesforce is slow
