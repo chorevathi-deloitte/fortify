@@ -650,16 +650,19 @@ jobs:
           fi
 
           for check_name in "${required_checks[@]}"; do
-            status=$(echo "$checks_json" | jq -r --arg n "$check_name" '.check_runs[] | select(.name == $n) | .status' | head -1)
-            conclusion=$(echo "$checks_json" | jq -r --arg n "$check_name" '.check_runs[] | select(.name == $n) | .conclusion' | head -1)
+            # Count check runs that completed successfully (any run, not just the latest).
+            # This is necessary because when pull_request_review fires, jobs skipped by
+            # their `if:` conditions produce new check-run entries with conclusion=skipped,
+            # which would shadow the earlier successful run on the same SHA.
+            success_count=$(echo "$checks_json" | jq \
+              --arg n "$check_name" \
+              '[.check_runs[] | select(.name == $n and .status == "completed" and .conclusion == "success")] | length')
 
-            if [[ -z "${status:-}" ]]; then
-              echo "::error::Required check '$check_name' not found on commit $HEAD_SHA."
-              exit 1
-            fi
-
-            if [[ "$status" != "completed" || "$conclusion" != "success" ]]; then
-              echo "::error::Required check '$check_name' is not successful (status=$status, conclusion=$conclusion)."
+            if [[ "$success_count" == "0" ]]; then
+              # Surface the most recent non-success entry for a useful error message.
+              last_status=$(echo "$checks_json" | jq -r --arg n "$check_name" \
+                '[.check_runs[] | select(.name == $n)] | sort_by(.started_at) | last | "\(.status)/\(.conclusion)"' 2>/dev/null || echo "not found")
+              echo "::error::Required check '$check_name' has no successful run on commit $HEAD_SHA (last seen: $last_status)."
               exit 1
             fi
           done
