@@ -101,7 +101,7 @@ jobs:
   trigger-crt-tests:
     name: Trigger CRT Test Job (EU Robotic)
     runs-on: ubuntu-latest
-    needs: deploy-to-sandbox
+    needs: deploy
     if: success()
 
     steps:
