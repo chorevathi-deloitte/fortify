@@ -142,6 +142,7 @@ jobs:
           # POST /api/v3/suites/{suiteId}/runs — triggers a run for the suite.
           # Find CRT_SUITE_ID: CRT UI → Test Suites → click suite → copy ID from URL.
           RESPONSE=$(curl -sS -w "\n%{http_code}" \
+
             -X POST "https://api.eu-robotic.copado.com/pace/v4/projects/${73283}/jobs/${115686}/builds" \
             -H "Authorization: apiKey ${CRT_API_KEY}" \
             -H "Content-Type: application/json" \
