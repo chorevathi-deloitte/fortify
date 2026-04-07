@@ -1,34 +1,17 @@
-name: Trigger Copado Robotic Testing Job
+name: Copado API Call
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 jobs:
-  trigger-test:
+  call-api:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Trigger CRT Job
+      - name: Call Copado Builds API
         run: |
-          echo "Triggering Copado Robotic Testing Job..."
-
-          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}\n" \
-            -X POST "https://robotic.copado.com/api/v3/test-jobs/${{ secrets.CRT_TEST_JOB_ID }}/runs" \
-            -H "Authorization: Bearer ${{ secrets.CRT_API_KEY }}" \
-            -H "Content-Type: application/json" \
-            -H "Accept: application/json" \
-            -d '{}')
-
-          echo "$RESPONSE"
-
-          STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d ':' -f2)
-
-          if [ "$STATUS" -ne 200 ] && [ "$STATUS" -ne 201 ]; then
-            echo "❌ Failed to trigger CRT job"
-            exit 1
-          fi
-
-          echo "✅ CRT job triggered successfully"
+          curl -X GET "https://eu-robotic.copado.com/pace/v4/projects/73283/builds" \
+          -H "accept: application/json" \
+          -H "cookie: $COPADO_COOKIE"
+        env:
+          COPADO_COOKIE: ${{ secrets.COPADO_COOKIE }}
