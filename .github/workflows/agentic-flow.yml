@@ -152,9 +152,6 @@ jobs:
             exit 1
           fi
 
-          RUN_ID=$(echo "${BODY}" | jq -r '.id // .runId // empty')
-          [ -n "${RUN_ID}" ] && echo "CRT run started — Run ID: ${RUN_ID}" || true
-
       - name: Mark story deployed
         uses: actions/github-script@v7
         with:
