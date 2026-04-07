@@ -122,7 +122,8 @@ jobs:
       - name: Trigger CRT Test Suite Run
         env:
           CRT_API_KEY: ${{ secrets.CRT_API_KEY }}
-          CRT_TEST_JOB_ID:  ${{ vars.CRT_TEST_JOB_ID }}
+          CRT_TEST_JOB_ID: ${{ vars.CRT_TEST_JOB_ID }}
+          CRT_ORG_ID:      ${{ vars.CRT_ORG_ID }}
         run: |
           set -euo pipefail
           if [ -z "${CRT_API_KEY}" ] || [ -z "${CRT_TEST_JOB_ID}" ]; then
@@ -130,14 +131,21 @@ jobs:
             exit 1
           fi
 
+          # Build JSON body — include orgId only when CRT_ORG_ID is set.
+          # Find CRT_ORG_ID: CRT UI → Settings → Organisation → copy the Org ID.
+          if [ -n "${CRT_ORG_ID}" ]; then
+            PAYLOAD=$(jq -cn --arg oid "${CRT_ORG_ID}" '{"orgId":$oid}')
+          else
+            PAYLOAD='{}'
+          fi
+
           # POST /api/v3/jobs/{jobId}/runs — triggers a run for a pre-configured CRT Job.
-          # The Job already has suite, robots, and environment stored in its definition.
           # Find CRT_TEST_JOB_ID: CRT UI → Jobs → click job → copy ID from the URL.
           RESPONSE=$(curl -sS -w "\n%{http_code}" \
             -X POST "https://eu-robotic.copado.com/api/v3/jobs/${CRT_TEST_JOB_ID}/runs" \
             -H "Authorization: apiKey ${CRT_API_KEY}" \
             -H "Content-Type: application/json" \
-            -d '{}')
+            -d "${PAYLOAD}")
 
           HTTP_CODE=$(echo "${RESPONSE}" | tail -1)
           BODY=$(echo "${RESPONSE}" | head -n -1)
