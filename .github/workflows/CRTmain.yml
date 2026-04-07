@@ -7,66 +7,31 @@ on:
       - main
 
 jobs:
-  run-crt:
+  trigger-crt:
     runs-on: ubuntu-latest
 
-    env:
-      BASE_URL: https://eu-robotic.copado.com/pace/v4/projects/73283/builds
-
     steps:
-      - name: Trigger CRT Job
-        id: trigger
+      - name: 🚀 Trigger CRT Job
         run: |
           echo "🚀 Triggering Copado Robotic Testing Job..."
 
-          RESPONSE=$(curl -s -X POST "$BASE_URL" \
-            -H "Accept: application/json" \
+          RESPONSE=$(curl -s -X POST "https://eu-robotic.copado.com/pace/v4/projects/73283/builds" \
             -H "Content-Type: application/json" \
-            -H "X-XSRF-TOKEN: $XSRF_TOKEN" \
-            -H "Cookie: $COPADO_COOKIE" \
-            -d '{"runMode":"REGRESSION"}')
+            -H "X-XSRF-TOKEN: 0Rmofp5mEH9IMJQ60hoYTQ==" \
+            -H "Cookie: ${{ secrets.COPADO_COOKIE }}" \
+            --data '{
+              "jobId": 123456
+            }')
 
           echo "Response: $RESPONSE"
 
-          BUILD_ID=$(echo $RESPONSE | grep -o '"id":[0-9]*' | head -1 | cut -d ':' -f2)
+          BUILD_ID=$(echo $RESPONSE | jq -r '.id')
 
-          if [ -z "$BUILD_ID" ]; then
+          if [ "$BUILD_ID" = "null" ] || [ -z "$BUILD_ID" ]; then
             echo "❌ Failed to extract Build ID"
             exit 1
           fi
 
-          echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
-          echo "✅ Build Triggered: $BUILD_ID"
+          echo "✅ Build triggered successfully"
+          echo "Build ID: $BUILD_ID"
 
-        env:
-          XSRF_TOKEN: ${{ secrets.XSRF_TOKEN }}
-          COPADO_COOKIE: ${{ secrets.COPADO_COOKIE }}
-
-      - name: Poll CRT Status
-        run: |
-          echo "⏳ Polling CRT Status..."
-
-          while true; do
-            STATUS_RESPONSE=$(curl -s "$BASE_URL/$BUILD_ID" \
-              -H "Accept: application/json" \
-              -H "X-XSRF-TOKEN: $XSRF_TOKEN" \
-              -H "Cookie: $COPADO_COOKIE")
-
-            STATUS=$(echo $STATUS_RESPONSE | grep -o '"status":"[^"]*"' | cut -d '"' -f4)
-
-            echo "📊 Status: $STATUS"
-
-            if [ "$STATUS" = "PASSED" ]; then
-              echo "✅ CRT Passed"
-              exit 0
-            elif [ "$STATUS" = "FAILED" ]; then
-              echo "❌ CRT Failed"
-              exit 1
-            fi
-
-            sleep 15
-          done
-
-        env:
-          XSRF_TOKEN: ${{ secrets.XSRF_TOKEN }}
-          COPADO_COOKIE: ${{ secrets.COPADO_COOKIE }}
