@@ -14,7 +14,7 @@ jobs:
       - name: Trigger CRT Job
         run: |
           curl -v -X POST "https://api.robotic.copado.com/v1/test-jobs/${{ secrets.CRT_TEST_JOB_ID }}/run" \
-            -H "Authorization: Bearer ${{ secrets.CRT_API_TOKEN }}" \
+            -H "Authorization: Bearer ${{ secrets.CRT_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d "{
               \"projectId\": \"${{ secrets.CRT_PROJECT_ID }}\",
