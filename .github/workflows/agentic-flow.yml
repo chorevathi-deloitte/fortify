@@ -122,52 +122,28 @@ jobs:
       - name: Trigger CRT Test Suite Run
         env:
           CRT_PAT:        ${{ secrets.CRT_PAT }}
-          CRT_PROJECT_ID: ${{ vars.CRT_PROJECT_ID }}
-          CRT_JOB_ID:     ${{ vars.CRT_JOB_ID }}
-          CRT_ORG_ID:     ${{ vars.CRT_ORG_ID }}
+          CRT_JOB_ID:     ${{ vars.CRT_JOB_ID     || '115686' }}
+          CRT_PROJECT_ID: ${{ vars.CRT_PROJECT_ID  || '73283'  }}
+          CRT_ORG_ID:     ${{ vars.CRT_ORG_ID      || '43532'  }}
         run: |
           set -euo pipefail
-          if [ -z "${CRT_PAT}" ] || [ -z "${CRT_PROJECT_ID}" ] || [ -z "${CRT_JOB_ID}" ]; then
-            echo "Missing required values — set these repository variables:"
-            echo "  CRT_PROJECT_ID (e.g. 73283)  CRT_JOB_ID (e.g. 115686)"
-            echo "And this secret: CRT_PAT"
+          if [ -z "${CRT_PAT}" ]; then
+            echo "Missing required secret: CRT_PAT"
             exit 1
           fi
 
-          # Build JSON body — include orgId only when CRT_ORG_ID is set.
-          if [ -n "${CRT_ORG_ID}" ]; then
-            PAYLOAD=$(jq -cn --arg oid "${CRT_ORG_ID}" '{"orgId":$oid}')
-          else
-            PAYLOAD='{}'
-          fi
+          # orgId, projectId, and jobId are all known from the CRT job URL:
+          # https://eu-robotic.copado.com/jobs/115686?projectId=73283&orgId=43532
+          PAYLOAD=$(jq -cn \
+            --arg org "${CRT_ORG_ID}" \
+            --arg proj "${CRT_PROJECT_ID}" \
+            '{"orgId":$org,"projectId":$proj}')
 
-          # Step 1 — Exchange PAT for a short-lived JWT.
-          echo "CRT_PAT length: ${#CRT_PAT} chars"
-          AUTH_RESPONSE=$(curl -sS -w "\n%{http_code}" \
-            -X POST "https://api.eu-robotic.copado.com/pace/v4/login" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -cn --arg key "${CRT_PAT}" '{"accessKey":$key}')")
+          echo "Triggering job ${CRT_JOB_ID} (project ${CRT_PROJECT_ID}, org ${CRT_ORG_ID})"
 
-          AUTH_CODE=$(echo "${AUTH_RESPONSE}" | tail -1)
-          AUTH_BODY=$(echo "${AUTH_RESPONSE}" | head -n -1)
-          echo "Auth HTTP ${AUTH_CODE}"
-
-          if [[ "${AUTH_CODE}" -lt 200 || "${AUTH_CODE}" -ge 300 ]]; then
-            echo "::error::CRT auth failed with HTTP ${AUTH_CODE}: ${AUTH_BODY}"
-            exit 1
-          fi
-
-          JWT=$(echo "${AUTH_BODY}" | jq -r '.token // .accessToken // .jwt // empty')
-          if [ -z "${JWT}" ]; then
-            echo "::error::Could not parse JWT from auth response: ${AUTH_BODY}"
-            exit 1
-          fi
-          echo "Auth token obtained (${#JWT} chars)"
-
-          # Step 2 — Trigger the job build using the JWT as Bearer token.
           RESPONSE=$(curl -sS -w "\n%{http_code}" \
-            -X POST "https://api.eu-robotic.copado.com/pace/v4/projects/${CRT_PROJECT_ID}/jobs/${CRT_JOB_ID}/builds" \
-            -H "Authorization: Bearer ${JWT}" \
+            -X POST "https://eu-robotic.copado.com/api/v3/jobs/${CRT_JOB_ID}/runs" \
+            -H "Authorization: apiKey ${CRT_PAT}" \
             -H "Content-Type: application/json" \
             -d "${PAYLOAD}")
 
@@ -180,8 +156,8 @@ jobs:
             exit 1
           fi
 
-          BUILD_ID=$(echo "${BODY}" | jq -r '.id // .buildId // empty')
-          [ -n "${BUILD_ID}" ] && echo "CRT build started — Build ID: ${BUILD_ID}" || true
+          RUN_ID=$(echo "${BODY}" | jq -r '.id // .runId // empty')
+          [ -n "${RUN_ID}" ] && echo "CRT run started — Run ID: ${RUN_ID}" || true
 
       - name: Mark story deployed
         uses: actions/github-script@v7
