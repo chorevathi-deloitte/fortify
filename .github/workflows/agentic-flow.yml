@@ -132,12 +132,8 @@ jobs:
             exit 1
           fi
 
-          # orgId, projectId, and jobId are all known from the CRT job URL:
-          # https://eu-robotic.copado.com/jobs/115686?projectId=73283&orgId=43532
-          PAYLOAD=$(jq -cn \
-            --arg org "${CRT_ORG_ID}" \
-            --arg proj "${CRT_PROJECT_ID}" \
-            '{"orgId":$org,"projectId":$proj}')
+          # Build payload with printf — avoids jq $var parse errors
+          PAYLOAD=$(printf '{"orgId":"%s","projectId":"%s"}' "${CRT_ORG_ID}" "${CRT_PROJECT_ID}")
 
           echo "Triggering job ${CRT_JOB_ID} (project ${CRT_PROJECT_ID}, org ${CRT_ORG_ID})"
 
