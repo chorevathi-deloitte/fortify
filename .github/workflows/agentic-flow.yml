@@ -121,29 +121,29 @@ jobs:
     steps:
       - name: Trigger CRT Test Suite Run
         env:
-          CRT_API_KEY:  ${{ secrets.CRT_API_KEY }}
-          CRT_SUITE_ID: ${{ vars.CRT_SUITE_ID }}
-          CRT_ORG_ID:   ${{ vars.CRT_ORG_ID }}
+          CRT_API_KEY:    ${{ secrets.CRT_API_KEY }}
+          CRT_PROJECT_ID: ${{ vars.CRT_PROJECT_ID }}
+          CRT_JOB_ID:     ${{ vars.CRT_JOB_ID }}
+          CRT_ORG_ID:     ${{ vars.CRT_ORG_ID }}
         run: |
           set -euo pipefail
-          if [ -z "${CRT_API_KEY}" ] || [ -z "${CRT_SUITE_ID}" ]; then
-            echo "Missing required secret/variable: CRT_API_KEY, CRT_SUITE_ID"
+          if [ -z "${CRT_API_KEY}" ] || [ -z "${CRT_PROJECT_ID}" ] || [ -z "${CRT_JOB_ID}" ]; then
+            echo "Missing required values — set these repository variables:"
+            echo "  CRT_PROJECT_ID (e.g. 73283)  CRT_JOB_ID (e.g. 115686)"
+            echo "And this secret: CRT_API_KEY"
             exit 1
           fi
 
           # Build JSON body — include orgId only when CRT_ORG_ID is set.
-          # Find CRT_ORG_ID: CRT UI → Settings → Organisation → copy the Org ID.
           if [ -n "${CRT_ORG_ID}" ]; then
             PAYLOAD=$(jq -cn --arg oid "${CRT_ORG_ID}" '{"orgId":$oid}')
           else
             PAYLOAD='{}'
           fi
 
-          # POST /api/v3/suites/{suiteId}/runs — triggers a run for the suite.
-          # Find CRT_SUITE_ID: CRT UI → Test Suites → click suite → copy ID from URL.
+          # POST /pace/v4/projects/{projectId}/jobs/{jobId}/builds — trigger a job build.
           RESPONSE=$(curl -sS -w "\n%{http_code}" \
-
-            -X POST "https://api.eu-robotic.copado.com/pace/v4/projects/${73283}/jobs/${115686}/builds" \
+            -X POST "https://api.eu-robotic.copado.com/pace/v4/projects/${CRT_PROJECT_ID}/jobs/${CRT_JOB_ID}/builds" \
             -H "Authorization: apiKey ${CRT_API_KEY}" \
             -H "Content-Type: application/json" \
             -d "${PAYLOAD}")
@@ -157,8 +157,8 @@ jobs:
             exit 1
           fi
 
-          RUN_ID=$(echo "${BODY}" | jq -r '.id // .runId // empty')
-          [ -n "${RUN_ID}" ] && echo "CRT run started — Run ID: ${RUN_ID}" || true
+          BUILD_ID=$(echo "${BODY}" | jq -r '.id // .buildId // empty')
+          [ -n "${BUILD_ID}" ] && echo "CRT build started — Build ID: ${BUILD_ID}" || true
 
       - name: Mark story deployed
         uses: actions/github-script@v7
