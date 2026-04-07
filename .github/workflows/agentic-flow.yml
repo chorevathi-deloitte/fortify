@@ -142,9 +142,13 @@ jobs:
           fi
 
           # POST /pace/v4/projects/{projectId}/jobs/{jobId}/builds — trigger a job build.
+          # Pace v4 uses Bearer token auth. Generate the token in CRT:
+          #   Profile icon → API Tokens → Create token → copy the full token string.
+          # Store it as secret CRT_API_KEY (no "apiKey " prefix — just the raw token).
+          echo "CRT_API_KEY length: ${#CRT_API_KEY} chars"  # debug: verify secret is set
           RESPONSE=$(curl -sS -w "\n%{http_code}" \
             -X POST "https://api.eu-robotic.copado.com/pace/v4/projects/${CRT_PROJECT_ID}/jobs/${CRT_JOB_ID}/builds" \
-            -H "Authorization: apiKey ${CRT_API_KEY}" \
+            -H "Authorization: Bearer ${CRT_API_KEY}" \
             -H "Content-Type: application/json" \
             -d "${PAYLOAD}")
 
