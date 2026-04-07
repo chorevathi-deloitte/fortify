@@ -122,19 +122,19 @@ jobs:
       - name: Trigger CRT Test Suite Run
         env:
           CRT_API_TOKEN: ${{ secrets.CRT_API_TOKEN }}
-          CRT_JOB_ID:  ${{ vars.CRT_JOB_ID }}
+          CRT_TEST_JOB_ID:  ${{ vars.CRT_TEST_JOB_ID }}
         run: |
           set -euo pipefail
-          if [ -z "${CRT_API_TOKEN}" ] || [ -z "${CRT_JOB_ID}" ]; then
-            echo "Missing required secret/variable: CRT_API_TOKEN, CRT_JOB_ID"
+          if [ -z "${CRT_API_TOKEN}" ] || [ -z "${CRT_TEST_JOB_ID}" ]; then
+            echo "Missing required secret/variable: CRT_API_TOKEN, CRT_TEST_JOB_ID"
             exit 1
           fi
 
           # POST /api/v3/jobs/{jobId}/runs — triggers a run for a pre-configured CRT Job.
           # The Job already has suite, robots, and environment stored in its definition.
-          # Find CRT_JOB_ID: CRT UI → Jobs → click job → copy ID from the URL.
+          # Find CRT_TEST_JOB_ID: CRT UI → Jobs → click job → copy ID from the URL.
           RESPONSE=$(curl -sS -w "\n%{http_code}" \
-            -X POST "https://eu-robotic.copado.com/api/v3/jobs/${CRT_JOB_ID}/runs" \
+            -X POST "https://eu-robotic.copado.com/api/v3/jobs/${CRT_TEST_JOB_ID}/runs" \
             -H "Authorization: apiKey ${CRT_API_TOKEN}" \
             -H "Content-Type: application/json" \
             -d '{}')
