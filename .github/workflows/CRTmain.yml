@@ -2,6 +2,9 @@ name: Run Copado CRT
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   run-crt:
