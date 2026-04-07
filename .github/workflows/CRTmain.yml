@@ -15,8 +15,8 @@ jobs:
         run: |
           echo "Triggering Copado Robotic Testing Job..."
 
-          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" -X POST \
-            "${{ secrets.CRT_API_ENDPOINT }}/api/v3/projects/${{ secrets.CRT_PROJECT_ID }}/jobs/${{ secrets.CRT_TEST_JOB_ID }}/runs" \
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}\n" \
+            -X POST "https://robotic.copado.com/api/v3/test-jobs/${{ secrets.CRT_TEST_JOB_ID }}/runs" \
             -H "Authorization: Bearer ${{ secrets.CRT_API_KEY }}" \
             -H "Content-Type: application/json" \
             -H "Accept: application/json" \
@@ -24,11 +24,11 @@ jobs:
 
           echo "$RESPONSE"
 
-          STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d":" -f2)
+          STATUS=$(echo "$RESPONSE" | grep HTTP_STATUS | cut -d ':' -f2)
 
           if [ "$STATUS" -ne 200 ] && [ "$STATUS" -ne 201 ]; then
             echo "❌ Failed to trigger CRT job"
             exit 1
-          else
-            echo "✅ CRT job triggered successfully"
           fi
+
+          echo "✅ CRT job triggered successfully"
