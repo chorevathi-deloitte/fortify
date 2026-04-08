@@ -5,7 +5,7 @@ name: UAT End-to-End Pipeline
 # Salesforce:
 #   vars.ORG_ALIAS                   - SF org alias (default: uat)
 #   vars.SFDX_AUTH_SECRET_NAME       - Name of the secret holding the SFDX auth URL
-#   vars.DELTA_FROM_COMMIT_VAR       - Name of the var holding the baseline commit SHA
+#   vars.DELTA_FROM_COMMIT           - Baseline commit SHA for delta calculation (e.g. last successful deploy SHA)
 #   vars.COVERAGE_THRESHOLD          - Apex coverage threshold % (default: 85)
 #   vars.SOURCE_DIR                  - Apex source directory (default: force-app/main/default)
 #   secrets.CRT_UAT_AUTHURL          - SFDX auth URL for the UAT org
@@ -65,7 +65,7 @@ defaults:
 env:
   ORG_ALIAS: ${{ vars.ORG_ALIAS || 'uat' }}
   SFDX_AUTH_SECRET_NAME: ${{ vars.SFDX_AUTH_SECRET_NAME || 'CRT_UAT_AUTHURL' }}
-  DELTA_FROM_COMMIT_VAR: ${{ vars.DELTA_FROM_COMMIT_VAR || 'CRT_UAT_COMMIT_ID' }}
+  DELTA_FROM_COMMIT: ${{ vars.DELTA_FROM_COMMIT }}
   COVERAGE_THRESHOLD: ${{ vars.COVERAGE_THRESHOLD || '85' }}
   SOURCE_DIR: ${{ vars.SOURCE_DIR || 'force-app/main/default' }}
   FCLI_BOOTSTRAP_VERSION: v3.16.0
@@ -901,12 +901,10 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Build delta package from merged commit
-        env:
-          DELTA_FROM_COMMIT: ${{ vars[env.DELTA_FROM_COMMIT_VAR] }}
         run: |
           set -euo pipefail
           if [[ -z "${DELTA_FROM_COMMIT:-}" ]]; then
-            echo "::error::Required repository variable '$DELTA_FROM_COMMIT_VAR' is missing or empty."
+            echo "::error::Repository variable DELTA_FROM_COMMIT is missing or empty. Set it to the baseline commit SHA."
             exit 1
           fi
           sf sgd:source:delta \
