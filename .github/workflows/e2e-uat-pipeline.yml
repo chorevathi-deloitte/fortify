@@ -882,16 +882,17 @@ jobs:
 
       - name: Authenticate target org
         env:
-          SFDX_AUTH_URL: ${{ secrets[env.SFDX_AUTH_SECRET_NAME] }}
+          SFDX_AUTH_URL: ${{ secrets.CRT_UAT_AUTHURL }}
         run: |
           set -euo pipefail
           if [[ -z "${SFDX_AUTH_URL:-}" ]]; then
-            echo "::error::Required auth URL secret '$SFDX_AUTH_SECRET_NAME' is missing or empty."
+            echo "::error::Secret CRT_UAT_AUTHURL is missing or empty."
             exit 1
           fi
           printf '%s' "$SFDX_AUTH_URL" > sfdxAuthUrl.txt
-          sf org login sfdx-url --sfdx-url-file sfdxAuthUrl.txt --alias "$ORG_ALIAS"
+          sf org login sfdx-url --sfdx-url-file sfdxAuthUrl.txt --alias "$ORG_ALIAS" --set-default
           rm -f sfdxAuthUrl.txt
+          sf org display --target-org "$ORG_ALIAS"
 
       - name: Install sfdx-git-delta plugin
         run: |
