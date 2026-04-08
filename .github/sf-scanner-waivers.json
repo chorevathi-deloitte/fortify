@@ -14,7 +14,7 @@
     "description": "Missing ApexDoc comment violation for CoverageDemoService.cls",
     "expiry": "2026-04-09",
     "reason": "Temporary waiver - ApexDoc comments to be added by April 9"
-  }
+  },
   {
     "rule": "ApexDoc",
     "file": "DeploySmokeCheck.cls",
