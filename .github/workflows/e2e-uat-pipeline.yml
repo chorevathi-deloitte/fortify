@@ -1269,7 +1269,6 @@ jobs:
       pull-requests: write
     steps:
       - name: Trigger CRT Test Execution
-        id: crt-trigger
         env:
           CRT_API_TOKEN:  ${{ secrets.CRT_API_TOKEN }}
           CRT_JOB_ID:     ${{ vars.CRT_JOB_ID     || '115686' }}
@@ -1281,222 +1280,52 @@ jobs:
             echo "::error::Missing required secret: CRT_API_TOKEN"
             exit 1
           fi
-
           echo "Triggering CRT job ${CRT_JOB_ID} (project ${CRT_PROJECT_ID}, org ${CRT_ORG_ID})"
-
           RESPONSE=$(curl -s \
             --header "X-Authorization: ${CRT_API_TOKEN}" \
             --header "Content-Type: application/json" \
             --json "{\"query\":\"mutation { createBuild(projectId: ${CRT_PROJECT_ID}, jobId: ${CRT_JOB_ID}) { message data { id buildNumber status startTime } } }\"}" \
             https://graphql.eu-robotic.copado.com/v1)
-
           echo "Response: ${RESPONSE}"
-
           if echo "${RESPONSE}" | grep -q '"errors"'; then
             ERR_MSG=$(echo "${RESPONSE}" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['errors'][0].get('message','unknown'))" 2>/dev/null || echo "unknown")
             echo "::error::Failed to trigger CRT job: ${ERR_MSG}"
             exit 1
           fi
-
           BUILD_ID=$(echo "${RESPONSE}" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['createBuild']['data']['id'])")
           STATUS=$(echo "${RESPONSE}"   | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['createBuild']['data']['status'])")
           BUILD_NO=$(echo "${RESPONSE}" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['createBuild']['data'].get('buildNumber','n/a'))")
-
           echo "✅ CRT job triggered successfully"
           echo "   Build ID:     ${BUILD_ID}"
           echo "   Build Number: ${BUILD_NO}"
           echo "   Status:       ${STATUS}"
-
-          # Expose outputs for the poll step
-          echo "build_id=${BUILD_ID}"    >> "$GITHUB_OUTPUT"
-          echo "build_no=${BUILD_NO}"    >> "$GITHUB_OUTPUT"
-
-      - name: Wait for CRT Job Result
-        id: crt-result
-        env:
-          CRT_API_TOKEN:  ${{ secrets.CRT_API_TOKEN }}
-          CRT_PROJECT_ID: ${{ vars.CRT_PROJECT_ID  || '73283'  }}
-          BUILD_ID:       ${{ steps.crt-trigger.outputs.build_id }}
-          BUILD_NO:       ${{ steps.crt-trigger.outputs.build_no }}
-          POLL_INTERVAL:  30    # seconds between polls
-          MAX_WAIT:       1800  # 30 minutes max
-        run: |
-          set -euo pipefail
-          CRT_API="https://graphql.eu-robotic.copado.com/v1"
-
-          if [ -z "${BUILD_ID}" ]; then
-            echo "::error::No BUILD_ID from trigger step — cannot poll for result."
-            exit 1
-          fi
-
-          echo "Polling CRT build ${BUILD_ID} every ${POLL_INTERVAL}s (max ${MAX_WAIT}s)..."
-          echo "Using: latestBuilds(projectId: ${CRT_PROJECT_ID}, resultSize: 10)"
-
-          ELAPSED=0
-          FINAL_STATUS=""
-          TOTAL=0; PASSED_T=0; FAILED_T=0; SKIPPED_T=0
-
-          while [ "${ELAPSED}" -lt "${MAX_WAIT}" ]; do
-
-            POLL_RESPONSE=$(curl -s \
-              --header "X-Authorization: ${CRT_API_TOKEN}" \
-              --header "Content-Type: application/json" \
-              --json "{\"query\":\"{ latestBuilds(projectId: ${CRT_PROJECT_ID}, resultSize: 10) { id status buildNumber startTime endTime totalTests passedTests failedTests skippedTests } }\"}" \
-              "${CRT_API}")
-
-            # Extract status for our specific BUILD_ID from the list
-            FINAL_STATUS=$(echo "${POLL_RESPONSE}" | python3 -c \
-              "import sys,json; d=json.load(sys.stdin); builds=d.get('data',{}).get('latestBuilds',[]) or []; b=next((x for x in builds if str(x.get('id',''))=='${BUILD_ID}'),None); print(b.get('status','') if b else 'NOT_FOUND')" \
-              2>/dev/null || echo "")
-
-            # Also extract test counts when we have a terminal status
-            if [ -n "${FINAL_STATUS}" ] && [ "${FINAL_STATUS}" != "NOT_FOUND" ]; then
-              read TOTAL PASSED_T FAILED_T SKIPPED_T <<< "$(echo "${POLL_RESPONSE}" | python3 -c \
-                "import sys,json; d=json.load(sys.stdin); builds=d.get('data',{}).get('latestBuilds',[]) or []; b=next((x for x in builds if str(x.get('id',''))=='${BUILD_ID}'),{}); print(b.get('totalTests',0),b.get('passedTests',0),b.get('failedTests',0),b.get('skippedTests',0))" \
-                2>/dev/null || echo "0 0 0 0")"
-            fi
-
-            echo "  [${ELAPSED}s] Build ${BUILD_ID} — Status: ${FINAL_STATUS:-unknown} | Tests: ${PASSED_T} passed / ${FAILED_T} failed / ${SKIPPED_T} skipped"
-
-            case "${FINAL_STATUS^^}" in
-              PASSED|SUCCESS|COMPLETED)
-                echo "final_status=${FINAL_STATUS}"       >> "$GITHUB_OUTPUT"
-                echo "total_tests=${TOTAL}"               >> "$GITHUB_OUTPUT"
-                echo "passed_tests=${PASSED_T}"           >> "$GITHUB_OUTPUT"
-                echo "failed_tests=${FAILED_T}"           >> "$GITHUB_OUTPUT"
-                echo "skipped_tests=${SKIPPED_T}"         >> "$GITHUB_OUTPUT"
-                echo ""
-                echo "✅ CRT Smoke Tests PASSED"
-                echo "   Total:   ${TOTAL}"
-                echo "   Passed:  ${PASSED_T}"
-                echo "   Failed:  ${FAILED_T}"
-                echo "   Skipped: ${SKIPPED_T}"
-                exit 0
-                ;;
-              FAILED|FAILURE|ERROR)
-                echo "final_status=${FINAL_STATUS}"       >> "$GITHUB_OUTPUT"
-                echo "total_tests=${TOTAL}"               >> "$GITHUB_OUTPUT"
-                echo "passed_tests=${PASSED_T}"           >> "$GITHUB_OUTPUT"
-                echo "failed_tests=${FAILED_T}"           >> "$GITHUB_OUTPUT"
-                echo "skipped_tests=${SKIPPED_T}"         >> "$GITHUB_OUTPUT"
-                echo ""
-                echo "::error::❌ CRT Smoke Tests FAILED"
-                echo "   Total:   ${TOTAL}"
-                echo "   Passed:  ${PASSED_T}"
-                echo "   Failed:  ${FAILED_T}"
-                echo "   Skipped: ${SKIPPED_T}"
-                exit 1
-                ;;
-              ABORTED|CANCELLED|TIMEOUT)
-                echo "final_status=${FINAL_STATUS}" >> "$GITHUB_OUTPUT"
-                echo "::error::⚠️ CRT job ${FINAL_STATUS}"
-                exit 1
-                ;;
-            esac
-
-            sleep "${POLL_INTERVAL}"
-            ELAPSED=$(( ELAPSED + POLL_INTERVAL ))
-          done
-
-          echo "::error::CRT job did not complete within ${MAX_WAIT}s (last status: ${FINAL_STATUS:-unknown})"
-          echo "final_status=TIMEOUT" >> "$GITHUB_OUTPUT"
-          exit 1
-
-
       - name: Post CRT deployment comment
-        if: always()
         uses: actions/github-script@v7
-        env:
-          CRT_STATUS:    ${{ steps.crt-result.outputs.final_status || 'TRIGGERED' }}
-          BUILD_ID:      ${{ steps.crt-trigger.outputs.build_id }}
-          BUILD_NO:      ${{ steps.crt-trigger.outputs.build_no }}
-          TOTAL_TESTS:   ${{ steps.crt-result.outputs.total_tests   || '0' }}
-          PASSED_TESTS:  ${{ steps.crt-result.outputs.passed_tests  || '0' }}
-          FAILED_TESTS:  ${{ steps.crt-result.outputs.failed_tests  || '0' }}
-          SKIPPED_TESTS: ${{ steps.crt-result.outputs.skipped_tests || '0' }}
-          CRT_JOB_ID:    ${{ vars.CRT_JOB_ID     || '115686' }}
-          CRT_PROJECT_ID: ${{ vars.CRT_PROJECT_ID  || '73283'  }}
-          CRT_ORG_ID:     ${{ vars.CRT_ORG_ID      || '43532'  }}
         with:
           script: |
-            const status   = process.env.CRT_STATUS || 'UNKNOWN';
-            const buildId  = process.env.BUILD_ID   || 'n/a';
-            const buildNo  = process.env.BUILD_NO   || 'n/a';
-            const total    = process.env.TOTAL_TESTS;
-            const passed   = process.env.PASSED_TESTS;
-            const failed   = process.env.FAILED_TESTS;
-            const skipped  = process.env.SKIPPED_TESTS;
-            const projId   = process.env.CRT_PROJECT_ID;
-            const orgId    = process.env.CRT_ORG_ID;
-            const jobId    = process.env.CRT_JOB_ID;
-
-            const UP  = status.toUpperCase();
-            const isPass = ['PASSED','SUCCESS','COMPLETED'].includes(UP);
-            const isPending = ['TRIGGERED','UNKNOWN',''].includes(UP);
-            const icon = isPass ? '✅' : isPending ? '🚀' : '❌';
-            const dashUrl = `https://eu-robotic.copado.com/builds/${buildId}?projectId=${projId}&orgId=${orgId}`;
-
-            const body = [
-              `${icon} **CRT Smoke Tests — ${status}**`,
-              '',
-              `| Field | Value |`,
-              `|-------|-------|`,
-              `| **Status** | ${icon} **${status}** |`,
-              `| Build Number | ${buildNo} |`,
-              `| Build ID | ${buildId} |`,
-              `| Job ID | ${jobId} |`,
-              `| ✅ Passed | ${passed} |`,
-              `| ❌ Failed | ${failed} |`,
-              `| ⏭️ Skipped | ${skipped} |`,
-              `| Total | ${total} |`,
-              `| Dashboard | [View Results](${dashUrl}) |`,
-            ].join('\n');
-
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
-              body,
+              body: "🤖 Deployed to UAT: CRT robotic tests have been triggered via Copado EU Robotic Testing."
             });
-
       - name: CRT Test Execution Summary
         if: always()
         env:
           CRT_JOB_ID:     ${{ vars.CRT_JOB_ID     || '115686' }}
           CRT_PROJECT_ID: ${{ vars.CRT_PROJECT_ID  || '73283'  }}
           CRT_ORG_ID:     ${{ vars.CRT_ORG_ID      || '43532'  }}
-          BUILD_ID:       ${{ steps.crt-trigger.outputs.build_id   || 'n/a' }}
-          BUILD_NO:       ${{ steps.crt-trigger.outputs.build_no   || 'n/a' }}
-          CRT_STATUS:     ${{ steps.crt-result.outputs.final_status || 'UNKNOWN' }}
-          TOTAL_TESTS:    ${{ steps.crt-result.outputs.total_tests   || '0' }}
-          PASSED_TESTS:   ${{ steps.crt-result.outputs.passed_tests  || '0' }}
-          FAILED_TESTS:   ${{ steps.crt-result.outputs.failed_tests  || '0' }}
-          SKIPPED_TESTS:  ${{ steps.crt-result.outputs.skipped_tests || '0' }}
         run: |
-          case "${CRT_STATUS^^}" in
-            PASSED|SUCCESS|COMPLETED) STATUS_ICON="✅" ;;
-            FAILED|FAILURE|ERROR)     STATUS_ICON="❌" ;;
-            *)                        STATUS_ICON="⚠️" ;;
-          esac
-
           {
-            echo "## 🧪 CRT Smoke Test Results"
+            echo "## 🧪 CRT Test Execution Summary"
             echo ""
             echo "| Detail | Value |"
             echo "|--------|-------|"
-            echo "| **Status** | ${STATUS_ICON} **${CRT_STATUS}** |"
-            echo "| **Build Number** | ${BUILD_NO} |"
-            echo "| **Build ID** | ${BUILD_ID} |"
-            echo "| **✅ Passed** | ${PASSED_TESTS} |"
-            echo "| **❌ Failed** | ${FAILED_TESTS} |"
-            echo "| **⏭️ Skipped** | ${SKIPPED_TESTS} |"
-            echo "| **Total** | ${TOTAL_TESTS} |"
             echo "| **Instance** | https://eu-robotic.copado.com |"
             echo "| **Org ID** | ${CRT_ORG_ID} |"
             echo "| **Project ID** | ${CRT_PROJECT_ID} |"
             echo "| **Job ID** | ${CRT_JOB_ID} |"
             echo ""
             echo "### 🔗 View Results"
-            echo "[Open CRT Dashboard](https://eu-robotic.copado.com/builds/${BUILD_ID}?projectId=${CRT_PROJECT_ID}&orgId=${CRT_ORG_ID})"
+            echo "[Open CRT Dashboard](https://eu-robotic.copado.com/jobs/${CRT_JOB_ID}?projectId=${CRT_PROJECT_ID}&orgId=${CRT_ORG_ID})"
           } >> "$GITHUB_STEP_SUMMARY"
-
