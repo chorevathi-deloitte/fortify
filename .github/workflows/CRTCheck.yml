@@ -14,7 +14,7 @@ jobs:
       contents: read
 
     steps:
-      # ── STEP 1 ─ Checkout so config file is available ─────────────────────
+      # ── STEP 1 ─ Checkout repository ──────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -65,7 +65,8 @@ jobs:
           JOB_ID:     ${{ secrets.CRT_TEST_JOB_ID }}
           API_KEY:    ${{ secrets.CRT_API_TOKEN }}
         run: |
-          GQL="https://graphql.eu-robotic.copado.com/v1"
+          # ── Correct base URL confirmed from browser DevTools ───────────────
+          BASE="https://eu-robotic.copado.com/pace/v4"
 
           echo "job_name=Unknown Job" >> $GITHUB_OUTPUT
           echo "job_id=${JOB_ID}"     >> $GITHUB_OUTPUT
@@ -78,40 +79,142 @@ jobs:
             exit 1
           fi
 
-          # ── Probe FL-specific header variants ─────────────────────────────
-          echo "--- Probing FL auth headers ---"
+          echo "Using PROJECT_ID=$PROJECT_ID  JOB_ID=$JOB_ID"
 
-          echo "-- 1) fl-access-key --"
-          R1=$(curl -s -X POST \
-            -H "fl-access-key: $API_KEY" \
+          # ── Exchange Personal Access Key for a session token ───────────────
+          # Copado uses cookie-based auth in browser — API uses token exchange
+          echo "--- Token exchange ---"
+          TOKEN_RESP=$(curl -s -X POST \
             -H "Content-Type: application/json" \
-            -d '{"query":"{ __typename }"}' \
-            "$GQL")
-          echo "$R1"
+            -d "{\"accessKey\":\"$API_KEY\"}" \
+            "https://eu-robotic.copado.com/pace/v4/auth/login")
+          echo "Login response: $TOKEN_RESP"
 
-          echo "-- 2) x-fl-access-key --"
-          R2=$(curl -s -X POST \
-            -H "x-fl-access-key: $API_KEY" \
-            -H "Content-Type: application/json" \
-            -d '{"query":"{ __typename }"}' \
-            "$GQL")
-          echo "$R2"
+          SESSION_TOKEN=$(echo "$TOKEN_RESP" | jq -r '.token // .data.token // .accessToken // .data.accessToken // empty')
 
-          echo "-- 3) fl-token --"
-          R3=$(curl -s -X POST \
-            -H "fl-token: $API_KEY" \
-            -H "Content-Type: application/json" \
-            -d '{"query":"{ __typename }"}' \
-            "$GQL")
-          echo "$R3"
+          # Fallback: try setting the cookie directly with the access key
+          if [ -z "$SESSION_TOKEN" ]; then
+            echo "--- Trying direct cookie auth ---"
+            COOKIE_RESP=$(curl -s -c /tmp/crt_cookies.txt \
+              -H "Content-Type: application/json" \
+              -d "{\"accessKey\":\"$API_KEY\"}" \
+              "https://eu-robotic.copado.com/pace/v4/auth/login")
+            echo "Cookie login response: $COOKIE_RESP"
+            SESSION_TOKEN=$(echo "$COOKIE_RESP" | jq -r '.token // .data.token // empty')
+          fi
 
-          echo "-- 4) fluorine-access-key --"
-          R4=$(curl -s -X POST \
-            -H "fluorine-access-key: $API_KEY" \
-            -H "Content-Type: application/json" \
-            -d '{"query":"{ __
-            
-      # ── STEP 4 ─ Print summary — always runs if PR was found ───────────────
+          # Fallback: try x-access-key header directly on API (no exchange)
+          if [ -z "$SESSION_TOKEN" ]; then
+            echo "--- Trying x-access-key directly ---"
+            DIRECT_RESP=$(curl -s \
+              -H "x-access-key: $API_KEY" \
+              -H "Content-Type: application/json" \
+              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID")
+            echo "Direct x-access-key response: $DIRECT_RESP"
+            # If this returned job data, use x-access-key directly
+            if echo "$DIRECT_RESP" | jq -e '.id' > /dev/null 2>&1; then
+              echo "✅ x-access-key works directly"
+              USE_DIRECT_KEY=true
+            fi
+          fi
+
+          # ── Fetch job name ─────────────────────────────────────────────────
+          echo "--- Fetching job info ---"
+          if [ "${USE_DIRECT_KEY}" = "true" ]; then
+            JOB_INFO=$(curl -s \
+              -H "x-access-key: $API_KEY" \
+              -H "Content-Type: application/json" \
+              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID")
+          elif [ -f /tmp/crt_cookies.txt ]; then
+            JOB_INFO=$(curl -s -b /tmp/crt_cookies.txt \
+              -H "Content-Type: application/json" \
+              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID")
+          else
+            JOB_INFO=$(curl -s \
+              -H "Authorization: Bearer $SESSION_TOKEN" \
+              -H "Content-Type: application/json" \
+              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID")
+          fi
+          echo "Job info response: $JOB_INFO"
+
+          JOB_NAME=$(echo "$JOB_INFO" | jq -r '.name // "Unknown Job"')
+          echo "job_name=$JOB_NAME" >> $GITHUB_OUTPUT
+          echo "job_id=$JOB_ID"     >> $GITHUB_OUTPUT
+
+          # ── Trigger build ──────────────────────────────────────────────────
+          echo "--- Triggering build ---"
+          if [ "${USE_DIRECT_KEY}" = "true" ]; then
+            RESPONSE=$(curl -s -X POST \
+              -H "x-access-key: $API_KEY" \
+              -H "Content-Type: application/json" \
+              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds")
+          elif [ -f /tmp/crt_cookies.txt ]; then
+            RESPONSE=$(curl -s -X POST \
+              -b /tmp/crt_cookies.txt \
+              -H "Content-Type: application/json" \
+              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds")
+          else
+            RESPONSE=$(curl -s -X POST \
+              -H "Authorization: Bearer $SESSION_TOKEN" \
+              -H "Content-Type: application/json" \
+              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds")
+          fi
+          echo "Trigger response: $RESPONSE"
+
+          BUILD_ID=$(echo "$RESPONSE" | jq -r '.id // .data.id // empty')
+          if [ -z "$BUILD_ID" ] || [ "$BUILD_ID" = "null" ]; then
+            echo "❌ Failed to extract Build ID"
+            echo "crt_status=TRIGGER FAILED" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          echo "✅ Build triggered — Build ID: $BUILD_ID"
+          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+
+          # ── Poll build status ──────────────────────────────────────────────
+          MAX_ATTEMPTS=60
+          ATTEMPT=0
+          FINAL_STATUS="TIMED OUT"
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep 30
+
+            if [ "${USE_DIRECT_KEY}" = "true" ]; then
+              STATUS_RESP=$(curl -s \
+                -H "x-access-key: $API_KEY" \
+                -H "Content-Type: application/json" \
+                "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds/$BUILD_ID" || echo '{}')
+            elif [ -f /tmp/crt_cookies.txt ]; then
+              STATUS_RESP=$(curl -s \
+                -b /tmp/crt_cookies.txt \
+                -H "Content-Type: application/json" \
+                "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds/$BUILD_ID" || echo '{}')
+            else
+              STATUS_RESP=$(curl -s \
+                -H "Authorization: Bearer $SESSION_TOKEN" \
+                -H "Content-Type: application/json" \
+                "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds/$BUILD_ID" || echo '{}')
+            fi
+
+            STATUS=$(echo "$STATUS_RESP" | jq -r '.status // "UNKNOWN"')
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — Status: $STATUS"
+
+            case "$STATUS" in
+              PASSED|SUCCESS|COMPLETED)
+                FINAL_STATUS="PASSED"; break ;;
+              FAILED|ERROR|ABORTED)
+                FINAL_STATUS="FAILED ($STATUS)"; break ;;
+              RUNNING|PENDING|QUEUED|IN_PROGRESS)
+                echo "⏳ Still in progress..." ;;
+              *)
+                echo "⚠️  Unrecognised status: $STATUS" ;;
+            esac
+          done
+
+          echo "crt_status=$FINAL_STATUS" >> $GITHUB_OUTPUT
+          echo "Final CRT result: $FINAL_STATUS"
+
+      # ── STEP 4 ─ Print summary — always runs if PR was found ──────────────
       - name: Print Job Summary
         if: always() && steps.pr_meta.outputs.has_pr == 'true'
         run: |
