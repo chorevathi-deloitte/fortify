@@ -62,68 +62,34 @@ jobs:
         env:
           PROJECT_ID: ${{ secrets.CRT_PROJECT_ID }}
           JOB_ID:     ${{ secrets.CRT_TEST_JOB_ID }}
-          API_KEY:    ${{ secrets.CRT_API_TOKEN }}
+          API_KEY:    ${{ secrets.CRT_API_KEY }}
         run: |
           BASE="https://api.eu-robotic.copado.com/pace/v4"
 
-          if [ -z "$PROJECT_ID" ] || [ -z "$JOB_ID" ]; then
-            echo "❌ Missing PROJECT_ID or JOB_ID secret"
-            exit 1
-          fi
+          # ── Test auth format — try these one at a time ─────────────────────
 
-          JOB_INFO=$(curl -sf \
+          echo "--- Testing: Authorization: Bearer ---"
+          curl -sf -w "\nHTTP %{http_code}\n" \
             -H "Authorization: Bearer $API_KEY" \
             -H "Content-Type: application/json" \
-            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID" || echo '{}')
-          JOB_NAME=$(echo "$JOB_INFO" | jq -r '.name // "Unknown Job"')
-          echo "job_name=$JOB_NAME" >> $GITHUB_OUTPUT
-          echo "job_id=$JOB_ID"     >> $GITHUB_OUTPUT
+            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID" || true
 
-          RESPONSE=$(curl -s -X POST \
-            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds" \
-            -H "Authorization: Bearer $API_KEY" \
-            -H "Content-Type: application/json")
-          echo "Trigger response: $RESPONSE"
+          echo "--- Testing: Authorization: no prefix ---"
+          curl -sf -w "\nHTTP %{http_code}\n" \
+            -H "Authorization: $API_KEY" \
+            -H "Content-Type: application/json" \
+            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID" || true
 
-          BUILD_ID=$(echo "$RESPONSE" | jq -r '.id')
-          if [ "$BUILD_ID" = "null" ] || [ -z "$BUILD_ID" ]; then
-            echo "❌ Failed to extract Build ID"
-            echo "crt_status=TRIGGER FAILED" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-          echo "✅ Build triggered — Build ID: $BUILD_ID"
-          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+          echo "--- Testing: x-api-key header ---"
+          curl -sf -w "\nHTTP %{http_code}\n" \
+            -H "x-api-key: $API_KEY" \
+            -H "Content-Type: application/json" \
+            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID" || true
 
-          MAX_ATTEMPTS=60
-          ATTEMPT=0
-          FINAL_STATUS="TIMED OUT"
-
-          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            sleep 30
-
-            STATUS_RESP=$(curl -sf \
-              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds/$BUILD_ID" \
-              -H "Authorization: Bearer $API_KEY" \
-              -H "Content-Type: application/json" || echo '{}')
-
-            STATUS=$(echo "$STATUS_RESP" | jq -r '.status // "UNKNOWN"')
-            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — Status: $STATUS"
-
-            case "$STATUS" in
-              PASSED|SUCCESS|COMPLETED)
-                FINAL_STATUS="PASSED"; break ;;
-              FAILED|ERROR|ABORTED)
-                FINAL_STATUS="FAILED ($STATUS)"; break ;;
-              RUNNING|PENDING|QUEUED|IN_PROGRESS)
-                echo "⏳ Still in progress..." ;;
-              *)
-                echo "⚠️  Unrecognised status: $STATUS" ;;
-            esac
-          done
-
-          echo "crt_status=$FINAL_STATUS" >> $GITHUB_OUTPUT
-          echo "Final CRT result: $FINAL_STATUS"
+          echo "--- Testing: apiKey query param ---"
+          curl -sf -w "\nHTTP %{http_code}\n" \
+            -H "Content-Type: application/json" \
+            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID?apiKey=$API_KEY" || true
 
       # ── STEP 4 ─ Print full summary to workflow logs ───────────────────────
       - name: Print Job Summary
