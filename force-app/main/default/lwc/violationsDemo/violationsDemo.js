@@ -29,3 +29,4 @@ export default class ViolationsDemo extends LightningElement {
     setTimeout("console.log('string timeout')", 10);
   }
 }
+
