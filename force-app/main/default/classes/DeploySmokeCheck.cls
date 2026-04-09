@@ -50,10 +50,7 @@ public with sharing class DeploySmokeCheck {
             throw new SmokeCheckException('Timestamp is not ISO-8601 Zulu: ' + value);
         }
     }
-
-    
-
-    
+  
     @TestVisible
     private static Boolean isIsoZulu(String value) {
         if (String.isBlank(value)) return false;

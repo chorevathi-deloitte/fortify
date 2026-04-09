@@ -39,9 +39,6 @@ private class DeploySmokeCheckTest {
         System.assert(out.warnings.contains('MESSAGE_TRUNCATED'));
         System.assertEquals(true, DeploySmokeCheck.isIsoZulu(out.timestampUtc));
     }
-
-    
-
     
     @IsTest
     static void isoZulu_validator_negativeCases_and_exception() {
