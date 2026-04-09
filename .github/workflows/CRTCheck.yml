@@ -1,72 +1,13 @@
-name: Trigger Copado Robotic Testing Job
-
-on:
-  workflow_dispatch:
-  push:
-    branches:
-      - my-uat
-
-jobs:
-  trigger-test:
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: read
-      contents: read
-
-    steps:
-      # ── STEP 1 ─ Checkout so config file is available ─────────────────────
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      # ── STEP 2 ─ Find merged PR and collect all metadata ──────────────────
-      - name: Collect PR Metadata
-        id: pr_meta
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          REPO="${{ github.repository }}"
-          COMMIT_SHA="${{ github.sha }}"
-
-          PR_DATA=$(curl -sf \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github.groot-preview+json" \
-            "https://api.github.com/repos/$REPO/commits/$COMMIT_SHA/pulls")
-
-          PR_NUMBER=$(echo "$PR_DATA" | jq -r '.[0].number // empty')
-
-          if [ -z "$PR_NUMBER" ]; then
-            echo "⏭️  Direct push — no associated PR. Skipping."
-            echo "has_pr=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "has_pr=true"          >> $GITHUB_OUTPUT
-          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
-          echo "run_number=${{ github.run_number }}" >> $GITHUB_OUTPUT
-
-          PR_RAISER=$(echo "$PR_DATA" | jq -r '.[0].user.login // empty')
-          echo "pr_raiser=$PR_RAISER" >> $GITHUB_OUTPUT
-
-          APPROVER=$(curl -sf \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER/reviews" \
-            | jq -r '[.[] | select(.state=="APPROVED")] | last | .user.login // "No approver found"')
-          echo "pr_approver=$APPROVER" >> $GITHUB_OUTPUT
-
-          echo "--- GITHUB_OUTPUT contents ---"
-          cat $GITHUB_OUTPUT
-
-      # ── STEP 3 ─ Trigger CRT job, get job name, poll to completion ─────────
+# ── STEP 3 ─ Trigger CRT job, get job name, poll to completion ─────────
       - name: Trigger and Poll CRT Job
         id: crt
         if: steps.pr_meta.outputs.has_pr == 'true'
         env:
           PROJECT_ID: ${{ secrets.CRT_PROJECT_ID }}
           JOB_ID:     ${{ secrets.CRT_TEST_JOB_ID }}
-          API_KEY:    ${{ secrets.CRT_API_TOKEN }}
+          API_KEY:    ${{ secrets.CRT_API_KEY }}
         run: |
           GQL="https://graphql.eu-robotic.copado.com/v1"
-          AUTH_BASE="https://api.eu-robotic.copado.com"
 
           echo "job_name=Unknown Job" >> $GITHUB_OUTPUT
           echo "job_id=${JOB_ID}"     >> $GITHUB_OUTPUT
@@ -79,44 +20,146 @@ jobs:
             exit 1
           fi
 
-          # ── Step A: exchange Personal Access Key for a session token ────────
-          echo "--- Token exchange ---"
-          TOKEN_RESP=$(curl -s -X POST \
+          # ── Probe which header the GQL endpoint accepts ────────────────────
+          echo "--- Probing auth header on GraphQL endpoint ---"
+
+          echo "-- 1) Authorization: Bearer --"
+          R1=$(curl -s -X POST \
+            -H "Authorization: Bearer $API_KEY" \
             -H "Content-Type: application/json" \
-            -d "{\"accessKey\": \"$API_KEY\"}" \
-            "$AUTH_BASE/auth/token")
-          echo "Token response: $TOKEN_RESP"
+            -d '{"query":"{ __typename }"}' \
+            "$GQL")
+          echo "$R1"
 
-          SESSION_TOKEN=$(echo "$TOKEN_RESP" | jq -r '.token // .accessToken // .sessionToken // empty')
+          echo "-- 2) x-api-key --"
+          R2=$(curl -s -X POST \
+            -H "x-api-key: $API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"query":"{ __typename }"}' \
+            "$GQL")
+          echo "$R2"
 
-          if [ -z "$SESSION_TOKEN" ]; then
-            TOKEN_RESP=$(curl -s -X POST \
-              -H "Content-Type: application/json" \
-              -d "{\"accessKey\": \"$API_KEY\"}" \
-              "$AUTH_BASE/pace/v4/auth/token")
-            echo "Token response v4: $TOKEN_RESP"
-            SESSION_TOKEN=$(echo "$TOKEN_RESP" | jq -r '.token // .accessToken // .sessionToken // empty')
+          echo "-- 3) pace-api-key --"
+          R3=$(curl -s -X POST \
+            -H "pace-api-key: $API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"query":"{ __typename }"}' \
+            "$GQL")
+          echo "$R3"
+
+          echo "-- 4) x-access-key --"
+          R4=$(curl -s -X POST \
+            -H "x-access-key: $API_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{"query":"{ __typename }"}' \
+            "$GQL")
+          echo "$R4"
+
+          echo "-- 5) No auth header --"
+          R5=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"query":"{ __typename }"}' \
+            "$GQL")
+          echo "$R5"
+
+          # ── Pick whichever returned data, not an error ─────────────────────
+          AUTH_HEADER=""
+          for combo in \
+            "Authorization: Bearer $API_KEY|$R1" \
+            "x-api-key: $API_KEY|$R2" \
+            "pace-api-key: $API_KEY|$R3" \
+            "x-access-key: $API_KEY|$R4" \
+            "none|$R5"; do
+            HDR="${combo%%|*}"
+            RESP="${combo##*|}"
+            if echo "$RESP" | jq -e '.data' > /dev/null 2>&1; then
+              AUTH_HEADER="$HDR"
+              echo "✅ Working auth header: $HDR"
+              break
+            fi
+          done
+
+          if [ -z "$AUTH_HEADER" ]; then
+            echo "❌ All auth headers failed — paste logs above and share"
+            echo "crt_status=AUTH FAILED" >> $GITHUB_OUTPUT
+            exit 1
           fi
 
-          if [ -z "$SESSION_TOKEN" ]; then
-            echo "❌ Could not obtain session token"
-            echo "crt_status=AUTH FA
+          # ── Fetch job name ─────────────────────────────────────────────────
+          echo "--- Fetching job info ---"
+          JOB_QUERY=$(jq -n \
+            --arg pid "$PROJECT_ID" \
+            --arg jid "$JOB_ID" \
+            '{"query":"query { job(projectId: \"\($pid)\", jobId: \"\($jid)\") { id name status } }"}')
 
-      # ── STEP 4 ─ Print summary — always runs if PR was found ───────────────
-      - name: Print Job Summary
-        if: always() && steps.pr_meta.outputs.has_pr == 'true'
-        run: |
-          echo ""
-          echo "╔══════════════════════════════════════════╗"
-          echo "║        CRT Job Execution Summary         ║"
-          echo "╠══════════════════════════════════════════╣"
-          echo "  PR Number       : #${{ steps.pr_meta.outputs.pr_number }}"
-          echo "  Workflow Run #  : ${{ steps.pr_meta.outputs.run_number }}"
-          echo "  PR Raiser       : ${{ steps.pr_meta.outputs.pr_raiser }}"
-          echo "  PR Approver     : ${{ steps.pr_meta.outputs.pr_approver }}"
-          echo "  Test Job Name   : ${{ steps.crt.outputs.job_name }}"
-          echo "  Test Job ID     : ${{ steps.crt.outputs.job_id }}"
-          echo "  Build ID        : ${{ steps.crt.outputs.build_id }}"
-          echo "  Test Result     : ${{ steps.crt.outputs.crt_status }}"
-          echo "╚══════════════════════════════════════════╝"
-          echo ""
+          JOB_INFO=$(curl -s -X POST \
+            -H "$AUTH_HEADER" \
+            -H "Content-Type: application/json" \
+            -d "$JOB_QUERY" \
+            "$GQL")
+          echo "Job info response: $JOB_INFO"
+
+          JOB_NAME=$(echo "$JOB_INFO" | jq -r '.data.job.name // "Unknown Job"')
+          echo "job_name=$JOB_NAME" >> $GITHUB_OUTPUT
+          echo "job_id=$JOB_ID"     >> $GITHUB_OUTPUT
+
+          # ── Trigger build ──────────────────────────────────────────────────
+          echo "--- Triggering build ---"
+          BUILD_MUTATION=$(jq -n \
+            --arg pid "$PROJECT_ID" \
+            --arg jid "$JOB_ID" \
+            '{"query":"mutation { createBuild(projectId: \"\($pid)\", jobId: \"\($jid)\") { message data { id buildNumber status startTime } } }"}')
+
+          RESPONSE=$(curl -s -X POST \
+            -H "$AUTH_HEADER" \
+            -H "Content-Type: application/json" \
+            -d "$BUILD_MUTATION" \
+            "$GQL")
+          echo "Trigger response: $RESPONSE"
+
+          BUILD_ID=$(echo "$RESPONSE" | jq -r '.data.createBuild.data.id // empty')
+          if [ -z "$BUILD_ID" ] || [ "$BUILD_ID" = "null" ]; then
+            echo "❌ Failed to extract Build ID"
+            echo "crt_status=TRIGGER FAILED" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          echo "✅ Build triggered — Build ID: $BUILD_ID"
+          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+
+          # ── Poll build status ──────────────────────────────────────────────
+          MAX_ATTEMPTS=60
+          ATTEMPT=0
+          FINAL_STATUS="TIMED OUT"
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep 30
+
+            STATUS_QUERY=$(jq -n \
+              --arg pid "$PROJECT_ID" \
+              --arg bid "$BUILD_ID" \
+              '{"query":"query { build(projectId: \"\($pid)\", buildId: \"\($bid)\") { id status } }"}')
+
+            STATUS_RESP=$(curl -s -X POST \
+              -H "$AUTH_HEADER" \
+              -H "Content-Type: application/json" \
+              -d "$STATUS_QUERY" \
+              "$GQL" || echo '{}')
+
+            STATUS=$(echo "$STATUS_RESP" | jq -r '.data.build.status // "UNKNOWN"')
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — Status: $STATUS"
+
+            case "$STATUS" in
+              PASSED|SUCCESS|COMPLETED)
+                FINAL_STATUS="PASSED"; break ;;
+              FAILED|ERROR|ABORTED)
+                FINAL_STATUS="FAILED ($STATUS)"; break ;;
+              RUNNING|PENDING|QUEUED|IN_PROGRESS)
+                echo "⏳ Still in progress..." ;;
+              *)
+                echo "⚠️  Unrecognised status: $STATUS" ;;
+            esac
+          done
+
+          echo "crt_status=$FINAL_STATUS" >> $GITHUB_OUTPUT
+          echo "Final CRT result: $FINAL_STATUS"
