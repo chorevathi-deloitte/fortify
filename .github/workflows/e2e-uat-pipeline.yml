@@ -1281,13 +1281,14 @@ jobs:
             exit 1
           fi
 
-          # Build payload with printf — avoids jq $var parse errors
-          PAYLOAD=$(printf '{"orgId":"%s","projectId":"%s"}' "${CRT_ORG_ID}" "${CRT_PROJECT_ID}")
+          # Build GraphQL mutation payload
+          PAYLOAD=$(printf '{"query":"mutation { runJob(jobId: \"%s\", orgId: \"%s\", projectId: \"%s\") { id status } }"}' \
+            "${CRT_JOB_ID}" "${CRT_ORG_ID}" "${CRT_PROJECT_ID}")
 
           echo "Triggering CRT job ${CRT_JOB_ID} (project ${CRT_PROJECT_ID}, org ${CRT_ORG_ID})"
 
           RESPONSE=$(curl -sS -w "\n%{http_code}" \
-            -X POST "https://graphql.eu-robotic.copado.com/v1/jobs/${CRT_JOB_ID}/runs" \
+            -X POST "https://graphql.eu-robotic.copado.com/v1" \
             -H "Authorization: apiKey ${CRT_PAT}" \
             -H "Content-Type: application/json" \
             -d "${PAYLOAD}")
@@ -1303,8 +1304,8 @@ jobs:
 
           echo "✅ CRT job triggered successfully (HTTP ${HTTP_CODE})"
 
-          # Response may be JSON, plain text, or empty — all fine after a 2xx.
-          RUN_ID=$(echo "${BODY}" | jq -r '.id // .runId // .executionId // empty' 2>/dev/null || true)
+          # GraphQL response shape: { "data": { "runJob": { "id": "...", "status": "..." } } }
+          RUN_ID=$(echo "${BODY}" | jq -r '.data.runJob.id // .id // .runId // .executionId // empty' 2>/dev/null || true)
           if [ -n "${RUN_ID}" ]; then
             echo "CRT Run ID: ${RUN_ID}"
           else
