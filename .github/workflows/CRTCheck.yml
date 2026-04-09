@@ -1,34 +1,231 @@
-name: New Trigger Copado Robotic Testing Job
+name: Trigger Copado Robotic Testing Job
 
 on:
   workflow_dispatch:
   push:
     branches:
-      - main
+      - my-uat
 
 jobs:
-  trigger-crt-test:
+  trigger-test:
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+      contents: read
 
     steps:
-      - name: Trigger CRT Job
+      # ── STEP 1 ─ Checkout repo so we can read the config file ─────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── STEP 2 ─ Find merged PR and collect all metadata ──────────────────
+      - name: Collect PR Metadata
+        id: pr_meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          RESPONSE=$(curl -s \
-            --header "X-Authorization: ${{ secrets.CRT_API_TOKEN }}" \
-            --header "Content-Type: application/json" \
-            --json "{\"query\":\"mutation { createBuild(projectId: ${{ secrets.CRT_PROJECT_ID }}, jobId: ${{ secrets.CRT_JOB_ID }}) { message data { id buildNumber status startTime } } }\"}" \
-            https://graphql.eu-robotic.copado.com/v1)
+          REPO="${{ github.repository }}"
+          COMMIT_SHA="${{ github.sha }}"
 
-          echo "Response: $RESPONSE"
+          # ── Look up the PR that produced this merge commit ─────────────────
+          PR_DATA=$(curl -sf \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github.groot-preview+json" \
+            "https://api.github.com/repos/$REPO/commits/$COMMIT_SHA/pulls")
 
-          if echo "$RESPONSE" | grep -q '"errors"'; then
-            echo "❌ Failed to trigger CRT job"
+          PR_NUMBER=$(echo "$PR_DATA" | jq -r '.[0].number // empty')
+
+          # ── No PR = direct push → skip all downstream steps ───────────────
+          if [ -z "$PR_NUMBER" ]; then
+            echo "⏭️  Direct push to uat — no associated PR found. Skipping."
+            echo "has_pr=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "has_pr=true"          >> $GITHUB_OUTPUT
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+          echo "run_number=${{ github.run_number }}" >> $GITHUB_OUTPUT
+
+          PR_RAISER=$(echo "$PR_DATA" | jq -r '.[0].user.login // empty')
+          echo "pr_raiser=$PR_RAISER" >> $GITHUB_OUTPUT
+
+          # ── Read sender + recipient from config file ───────────────────────
+          CONFIG=$(cat .github/crt-notify-config.json)
+
+          SENDER_EMAIL=$(echo "$CONFIG" | jq -r '.sender_email')
+          echo "sender_email=$SENDER_EMAIL" >> $GITHUB_OUTPUT
+
+          RAISER_EMAIL=$(echo "$CONFIG" | jq -r --arg u "$PR_RAISER" '.user_map[$u] // empty')
+
+          if [ -z "$RAISER_EMAIL" ]; then
+            echo "⚠️  '$PR_RAISER' not found in crt-notify-config.json — trying GitHub profile..."
+            RAISER_EMAIL=$(curl -sf \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/users/$PR_RAISER" \
+              | jq -r '.email // empty')
+          fi
+
+          if [ -z "$RAISER_EMAIL" ]; then
+            echo "⚠️  No email resolved for $PR_RAISER. Email step will be skipped."
+          fi
+          echo "pr_raiser_email=${RAISER_EMAIL}" >> $GITHUB_OUTPUT
+
+          # ── Latest approved reviewer ───────────────────────────────────────
+          APPROVER=$(curl -sf \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/$REPO/pulls/$PR_NUMBER/reviews" \
+            | jq -r '[.[] | select(.state=="APPROVED")] | last | .user.login // "No approver found"')
+          echo "pr_approver=$APPROVER" >> $GITHUB_OUTPUT
+
+      # ── STEP 3 ─ Trigger CRT job, fetch job name, poll to completion ───────
+      - name: Trigger and Poll CRT Job
+        id: crt
+        if: steps.pr_meta.outputs.has_pr == 'true'
+        env:
+          PROJECT_ID: ${{ secrets.CRT_PROJECT_ID }}
+          JOB_ID:     ${{ secrets.CRT_TEST_JOB_ID }}
+          API_KEY:    ${{ secrets.CRT_API_KEY }}
+        run: |
+          BASE="https://api.eu-robotic.copado.com/pace/v4"
+
+          if [ -z "$PROJECT_ID" ] || [ -z "$JOB_ID" ]; then
+            echo "❌ Missing PROJECT_ID or JOB_ID secret"
             exit 1
           fi
 
-          BUILD_ID=$(echo $RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['createBuild']['data']['id'])")
-          STATUS=$(echo $RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['createBuild']['data']['status'])")
+          # ── Fetch human-readable job name ──────────────────────────────────
+          JOB_INFO=$(curl -sf \
+            -H "Authorization: Bearer $API_KEY" \
+            -H "Content-Type: application/json" \
+            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID" || echo '{}')
+          JOB_NAME=$(echo "$JOB_INFO" | jq -r '.name // "Unknown Job"')
+          echo "job_name=$JOB_NAME" >> $GITHUB_OUTPUT
+          echo "job_id=$JOB_ID"     >> $GITHUB_OUTPUT
 
-          echo "✅ CRT Job triggered successfully!"
-          echo "Build ID: $BUILD_ID"
-          echo "Status: $STATUS"
+          # ── Trigger the build ──────────────────────────────────────────────
+          RESPONSE=$(curl -s -X POST \
+            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds" \
+            -H "Authorization: Bearer $API_KEY" \
+            -H "Content-Type: application/json")
+          echo "Trigger response: $RESPONSE"
+
+          BUILD_ID=$(echo "$RESPONSE" | jq -r '.id')
+          if [ "$BUILD_ID" = "null" ] || [ -z "$BUILD_ID" ]; then
+            echo "❌ Failed to extract Build ID"
+            echo "crt_status=TRIGGER FAILED" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          echo "✅ Build triggered — Build ID: $BUILD_ID"
+          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
+
+          # ── Poll every 30s, timeout after 30 min (60 attempts) ────────────
+          MAX_ATTEMPTS=60
+          ATTEMPT=0
+          FINAL_STATUS="TIMED OUT"
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            sleep 30
+
+            STATUS_RESP=$(curl -sf \
+              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds/$BUILD_ID" \
+              -H "Authorization: Bearer $API_KEY" \
+              -H "Content-Type: application/json" || echo '{}')
+
+            STATUS=$(echo "$STATUS_RESP" | jq -r '.status // "UNKNOWN"')
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — Status: $STATUS"
+
+            case "$STATUS" in
+              PASSED|SUCCESS|COMPLETED)
+                FINAL_STATUS="PASSED"; break ;;
+              FAILED|ERROR|ABORTED)
+                FINAL_STATUS="FAILED ($STATUS)"; break ;;
+              RUNNING|PENDING|QUEUED|IN_PROGRESS)
+                echo "⏳ Still in progress..." ;;
+              *)
+                echo "⚠️  Unrecognised status: $STATUS" ;;
+            esac
+          done
+
+          echo "crt_status=$FINAL_STATUS" >> $GITHUB_OUTPUT
+          echo "Final CRT result: $FINAL_STATUS"
+
+      # ── STEP 4 ─ Print structured summary to workflow logs ─────────────────
+      - name: Print Job Summary
+        if: steps.pr_meta.outputs.has_pr == 'true'
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════╗"
+          echo "║        CRT Job Execution Summary         ║"
+          echo "╠══════════════════════════════════════════╣"
+          echo "  PR Number       : #${{ steps.pr_meta.outputs.pr_number }}"
+          echo "  Workflow Run #  : ${{ steps.pr_meta.outputs.run_number }}"
+          echo "  PR Raiser       : ${{ steps.pr_meta.outputs.pr_raiser }}"
+          echo "  PR Approver     : ${{ steps.pr_meta.outputs.pr_approver }}"
+          echo "  Test Job Name   : ${{ steps.crt.outputs.job_name }}"
+          echo "  Test Job ID     : ${{ steps.crt.outputs.job_id }}"
+          echo "  Build ID        : ${{ steps.crt.outputs.build_id }}"
+          echo "  Test Result     : ${{ steps.crt.outputs.crt_status }}"
+          echo "╚══════════════════════════════════════════╝"
+          echo ""
+
+      # ── STEP 5 ─ Send email via SendGrid (single curl, one API key) ─────────
+      - name: Send Email Notification
+        if: |
+          steps.pr_meta.outputs.has_pr == 'true' &&
+          steps.pr_meta.outputs.pr_raiser_email != ''
+        env:
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+        run: |
+          TO="${{ steps.pr_meta.outputs.pr_raiser_email }}"
+          FROM="${{ steps.pr_meta.outputs.sender_email }}"
+          SUBJECT="[PR #${{ steps.pr_meta.outputs.pr_number }}] CRT Result: ${{ steps.crt.outputs.crt_status }}"
+
+          BODY="Hi ${{ steps.pr_meta.outputs.pr_raiser }},
+
+Your PR has been merged to UAT and the CRT test job has completed.
+
+------------------------------------------
+  CRT Test Execution Report
+------------------------------------------
+  PR Number        :  #${{ steps.pr_meta.outputs.pr_number }}
+  Workflow Run #   :  ${{ steps.pr_meta.outputs.run_number }}
+  PR Raiser        :  ${{ steps.pr_meta.outputs.pr_raiser }}
+  PR Approver      :  ${{ steps.pr_meta.outputs.pr_approver }}
+  Test Job Name    :  ${{ steps.crt.outputs.job_name }}
+  Test Job ID      :  ${{ steps.crt.outputs.job_id }}
+  Test Result      :  ${{ steps.crt.outputs.crt_status }}
+------------------------------------------
+
+View full run:
+https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+Regards,
+GitHub Actions Bot"
+
+          # ── Build and send the payload ─────────────────────────────────────
+          PAYLOAD=$(jq -n \
+            --arg to   "$TO"      \
+            --arg from "$FROM"    \
+            --arg subj "$SUBJECT" \
+            --arg body "$BODY"    \
+            '{
+              personalizations: [{ to: [{ email: $to }] }],
+              from:    { email: $from },
+              subject: $subj,
+              content: [{ type: "text/plain", value: $body }]
+            }')
+
+          HTTP_CODE=$(curl -s -o /tmp/sg_response.txt -w "%{http_code}" \
+            -X POST "https://api.sendgrid.com/v3/mail/send" \
+            -H "Authorization: Bearer $SENDGRID_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+
+          if [ "$HTTP_CODE" = "202" ]; then
+            echo "✅ Email sent to $TO"
+          else
+            echo "❌ SendGrid returned HTTP $HTTP_CODE"
+            cat /tmp/sg_response.txt
+            exit 1
+          fi
