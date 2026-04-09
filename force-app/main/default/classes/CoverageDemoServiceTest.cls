@@ -33,9 +33,6 @@ private class CoverageDemoServiceTest {
             System.assert(e.getMessage().contains('amount must be >= 0'));
         }
     }
-
-    
-
     
     @IsTest
     static void testClassifyAccount_allBranches() {
