@@ -1415,8 +1415,8 @@ jobs:
           FAILED_TESTS:  ${{ steps.crt-result.outputs.failed_tests  || '0' }}
           SKIPPED_TESTS: ${{ steps.crt-result.outputs.skipped_tests || '0' }}
           CRT_JOB_ID:    ${{ vars.CRT_JOB_ID     || '115686' }}
-          CRT_PROJECT_ID:${{ vars.CRT_PROJECT_ID  || '73283'  }}
-          CRT_ORG_ID:    ${{ vars.CRT_ORG_ID      || '43532'  }}
+          CRT_PROJECT_ID: ${{ vars.CRT_PROJECT_ID  || '73283'  }}
+          CRT_ORG_ID:     ${{ vars.CRT_ORG_ID      || '43532'  }}
         with:
           script: |
             const status   = process.env.CRT_STATUS || 'UNKNOWN';
