@@ -65,7 +65,8 @@ jobs:
           JOB_ID:     ${{ secrets.CRT_TEST_JOB_ID }}
           API_KEY:    ${{ secrets.CRT_API_TOKEN }}
         run: |
-          BASE="https://api.eu-robotic.copado.com/pace/v4"
+          GQL="https://graphql.eu-robotic.copado.com/v1"
+          AUTH_BASE="https://api.eu-robotic.copado.com"
 
           echo "job_name=Unknown Job" >> $GITHUB_OUTPUT
           echo "job_id=${JOB_ID}"     >> $GITHUB_OUTPUT
@@ -78,65 +79,28 @@ jobs:
             exit 1
           fi
 
-          echo "--- Fetching job info ---"
-          JOB_INFO=$(curl -s \
-            -H "pace-api-key: $API_KEY" \
+          # ── Step A: exchange Personal Access Key for a session token ────────
+          echo "--- Token exchange ---"
+          TOKEN_RESP=$(curl -s -X POST \
             -H "Content-Type: application/json" \
-            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID")
-          echo "Job info response: $JOB_INFO"
+            -d "{\"accessKey\": \"$API_KEY\"}" \
+            "$AUTH_BASE/auth/token")
+          echo "Token response: $TOKEN_RESP"
 
-          JOB_NAME=$(echo "$JOB_INFO" | jq -r '.name // "Unknown Job"')
-          echo "job_name=$JOB_NAME" >> $GITHUB_OUTPUT
-          echo "job_id=$JOB_ID"     >> $GITHUB_OUTPUT
+          SESSION_TOKEN=$(echo "$TOKEN_RESP" | jq -r '.token // .accessToken // .sessionToken // empty')
 
-          echo "--- Triggering build ---"
-          RESPONSE=$(curl -s -X POST \
-            -H "pace-api-key: $API_KEY" \
-            -H "Content-Type: application/json" \
-            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds")
-          echo "Trigger response: $RESPONSE"
-
-          BUILD_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
-          if [ -z "$BUILD_ID" ] || [ "$BUILD_ID" = "null" ]; then
-            echo "❌ Failed to extract Build ID"
-            echo "crt_status=TRIGGER FAILED" >> $GITHUB_OUTPUT
-            exit 1
+          if [ -z "$SESSION_TOKEN" ]; then
+            TOKEN_RESP=$(curl -s -X POST \
+              -H "Content-Type: application/json" \
+              -d "{\"accessKey\": \"$API_KEY\"}" \
+              "$AUTH_BASE/pace/v4/auth/token")
+            echo "Token response v4: $TOKEN_RESP"
+            SESSION_TOKEN=$(echo "$TOKEN_RESP" | jq -r '.token // .accessToken // .sessionToken // empty')
           fi
 
-          echo "✅ Build triggered — Build ID: $BUILD_ID"
-          echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
-
-          MAX_ATTEMPTS=60
-          ATTEMPT=0
-          FINAL_STATUS="TIMED OUT"
-
-          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-            ATTEMPT=$((ATTEMPT + 1))
-            sleep 30
-
-            STATUS_RESP=$(curl -s \
-              -H "pace-api-key: $API_KEY" \
-              -H "Content-Type: application/json" \
-              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds/$BUILD_ID" \
-              || echo '{}')
-
-            STATUS=$(echo "$STATUS_RESP" | jq -r '.status // "UNKNOWN"')
-            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — Status: $STATUS"
-
-            case "$STATUS" in
-              PASSED|SUCCESS|COMPLETED)
-                FINAL_STATUS="PASSED"; break ;;
-              FAILED|ERROR|ABORTED)
-                FINAL_STATUS="FAILED ($STATUS)"; break ;;
-              RUNNING|PENDING|QUEUED|IN_PROGRESS)
-                echo "⏳ Still in progress..." ;;
-              *)
-                echo "⚠️  Unrecognised status: $STATUS" ;;
-            esac
-          done
-
-          echo "crt_status=$FINAL_STATUS" >> $GITHUB_OUTPUT
-          echo "Final CRT result: $FINAL_STATUS"
+          if [ -z "$SESSION_TOKEN" ]; then
+            echo "❌ Could not obtain session token"
+            echo "crt_status=AUTH FA
 
       # ── STEP 4 ─ Print summary — always runs if PR was found ───────────────
       - name: Print Job Summary
