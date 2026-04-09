@@ -64,7 +64,7 @@ jobs:
         env:
           PROJECT_ID: ${{ secrets.CRT_PROJECT_ID }}
           JOB_ID:     ${{ secrets.CRT_TEST_JOB_ID }}
-          API_KEY:    ${{ secrets.CRT_API_KEY }}
+          API_KEY:    ${{ secrets.CRT_API_TOKEN}}
         run: |
           BASE="https://api.eu-robotic.copado.com/pace/v4"
 
@@ -132,7 +132,7 @@ jobs:
             echo "✅ apiKey query param works"
             AUTH_PARAM="?apiKey=$API_KEY"
           else
-            echo "❌ All auth formats failed — check CRT_API_KEY value in repo secrets"
+            echo "❌ All auth formats failed — check CRT_API_TOKENvalue in repo secrets"
             echo "crt_status=AUTH FAILED" >> $GITHUB_OUTPUT
             exit 1
           fi
