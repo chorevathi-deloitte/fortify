@@ -11,6 +11,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Debug Token
+        run: |
+          echo "Token length: ${#TOKEN}"
+          echo "Token first 4 chars: ${TOKEN:0:4}"
+          echo "Token last 4 chars: ${TOKEN: -4}"
+        env:
+          TOKEN: ${{ secrets.CRT_API_TOKEN }}
+          
       - name: Trigger CRT Job
         run: |
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
