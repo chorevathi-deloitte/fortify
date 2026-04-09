@@ -34,7 +34,6 @@ jobs:
 
           PR_NUMBER=$(echo "$PR_DATA" | jq -r '.[0].number // empty')
 
-          # ── Direct push = no PR → skip everything ──────────────────────────
           if [ -z "$PR_NUMBER" ]; then
             echo "⏭️  Direct push — no associated PR. Skipping."
             echo "has_pr=false" >> $GITHUB_OUTPUT
@@ -64,94 +63,37 @@ jobs:
         env:
           PROJECT_ID: ${{ secrets.CRT_PROJECT_ID }}
           JOB_ID:     ${{ secrets.CRT_TEST_JOB_ID }}
-          API_KEY:    ${{ secrets.CRT_API_TOKEN}}
+          API_KEY:    ${{ secrets.CRT_API_KEY }}
         run: |
           BASE="https://api.eu-robotic.copado.com/pace/v4"
 
-          # ── Write safe defaults first — always visible even if step fails ──
           echo "job_name=Unknown Job" >> $GITHUB_OUTPUT
           echo "job_id=${JOB_ID}"     >> $GITHUB_OUTPUT
           echo "build_id=N/A"         >> $GITHUB_OUTPUT
           echo "crt_status=NOT RUN"   >> $GITHUB_OUTPUT
 
           if [ -z "$PROJECT_ID" ] || [ -z "$JOB_ID" ]; then
-            echo "❌ Missing PROJECT_ID or JOB_ID secret"
+            echo "❌ Missing PROJECT_ID or JOB_ID"
             echo "crt_status=MISSING SECRETS" >> $GITHUB_OUTPUT
             exit 1
           fi
 
-          # ── Probe all auth formats to find which one Copado accepts ────────
-          echo ""
-          echo "=== AUTH FORMAT PROBE ==="
-
-          echo "--- 1) Bearer prefix ---"
-          curl -s -o /tmp/r1.json -w "HTTP %{http_code}\n" \
-            -H "Authorization: Bearer $API_KEY" \
+          echo "--- Fetching job info ---"
+          JOB_INFO=$(curl -s \
+            -H "pace-api-key: $API_KEY" \
             -H "Content-Type: application/json" \
-            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID" || true
-          echo "Response: $(cat /tmp/r1.json)"
+            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID")
+          echo "Job info response: $JOB_INFO"
 
-          echo "--- 2) No prefix ---"
-          curl -s -o /tmp/r2.json -w "HTTP %{http_code}\n" \
-            -H "Authorization: $API_KEY" \
-            -H "Content-Type: application/json" \
-            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID" || true
-          echo "Response: $(cat /tmp/r2.json)"
-
-          echo "--- 3) x-api-key header ---"
-          curl -s -o /tmp/r3.json -w "HTTP %{http_code}\n" \
-            -H "x-api-key: $API_KEY" \
-            -H "Content-Type: application/json" \
-            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID" || true
-          echo "Response: $(cat /tmp/r3.json)"
-
-          echo "--- 4) apiKey query param ---"
-          curl -s -o /tmp/r4.json -w "HTTP %{http_code}\n" \
-            -H "Content-Type: application/json" \
-            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID?apiKey=$API_KEY" || true
-          echo "Response: $(cat /tmp/r4.json)"
-
-          echo "=== END AUTH PROBE ==="
-          echo ""
-
-          # ── Pick the format that returned HTTP 200 ─────────────────────────
-          # Read each response and use the first successful one
-          AUTH_HEADER=""
-          AUTH_PARAM=""
-
-          if cat /tmp/r1.json | jq -e '.name' > /dev/null 2>&1; then
-            echo "✅ Bearer prefix works"
-            AUTH_HEADER="Authorization: Bearer $API_KEY"
-          elif cat /tmp/r2.json | jq -e '.name' > /dev/null 2>&1; then
-            echo "✅ No prefix works"
-            AUTH_HEADER="Authorization: $API_KEY"
-          elif cat /tmp/r3.json | jq -e '.name' > /dev/null 2>&1; then
-            echo "✅ x-api-key header works"
-            AUTH_HEADER="x-api-key: $API_KEY"
-          elif cat /tmp/r4.json | jq -e '.name' > /dev/null 2>&1; then
-            echo "✅ apiKey query param works"
-            AUTH_PARAM="?apiKey=$API_KEY"
-          else
-            echo "❌ All auth formats failed — check CRT_API_TOKENvalue in repo secrets"
-            echo "crt_status=AUTH FAILED" >> $GITHUB_OUTPUT
-            exit 1
-          fi
-
-          # ── Fetch job name using working auth ──────────────────────────────
-          JOB_INFO=$(curl -sf \
-            -H "$AUTH_HEADER" \
-            -H "Content-Type: application/json" \
-            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID${AUTH_PARAM}" || echo '{}')
           JOB_NAME=$(echo "$JOB_INFO" | jq -r '.name // "Unknown Job"')
           echo "job_name=$JOB_NAME" >> $GITHUB_OUTPUT
           echo "job_id=$JOB_ID"     >> $GITHUB_OUTPUT
-          echo "Resolved job name: $JOB_NAME"
 
-          # ── Trigger the build ──────────────────────────────────────────────
+          echo "--- Triggering build ---"
           RESPONSE=$(curl -s -X POST \
-            -H "$AUTH_HEADER" \
+            -H "pace-api-key: $API_KEY" \
             -H "Content-Type: application/json" \
-            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds${AUTH_PARAM}")
+            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds")
           echo "Trigger response: $RESPONSE"
 
           BUILD_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
@@ -160,10 +102,10 @@ jobs:
             echo "crt_status=TRIGGER FAILED" >> $GITHUB_OUTPUT
             exit 1
           fi
+
           echo "✅ Build triggered — Build ID: $BUILD_ID"
           echo "build_id=$BUILD_ID" >> $GITHUB_OUTPUT
 
-          # ── Poll every 30s, timeout after 30 min ───────────────────────────
           MAX_ATTEMPTS=60
           ATTEMPT=0
           FINAL_STATUS="TIMED OUT"
@@ -172,10 +114,10 @@ jobs:
             ATTEMPT=$((ATTEMPT + 1))
             sleep 30
 
-            STATUS_RESP=$(curl -sf \
-              -H "$AUTH_HEADER" \
+            STATUS_RESP=$(curl -s \
+              -H "pace-api-key: $API_KEY" \
               -H "Content-Type: application/json" \
-              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds/$BUILD_ID${AUTH_PARAM}" \
+              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds/$BUILD_ID" \
               || echo '{}')
 
             STATUS=$(echo "$STATUS_RESP" | jq -r '.status // "UNKNOWN"')
@@ -196,7 +138,7 @@ jobs:
           echo "crt_status=$FINAL_STATUS" >> $GITHUB_OUTPUT
           echo "Final CRT result: $FINAL_STATUS"
 
-      # ── STEP 4 ─ Print full summary — runs always, even if step 3 fails ───
+      # ── STEP 4 ─ Print summary — always runs if PR was found ───────────────
       - name: Print Job Summary
         if: always() && steps.pr_meta.outputs.has_pr == 'true'
         run: |
