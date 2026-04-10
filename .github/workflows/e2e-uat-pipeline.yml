@@ -35,7 +35,7 @@ on:
     paths:
       - force-app/**
       - .github/workflows/e2e-uat-pipeline.yml
-      - .github/sf-scanner-waivers.json
+      - .github/sf-scanner-waivers.csv
 
   pull_request_review:
     types:
