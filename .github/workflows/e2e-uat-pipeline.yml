@@ -771,6 +771,17 @@ jobs:
           RESULTS_CSV    = "sca-governance-report.csv"
           COMMENT_MD     = "sca-pr-comment.md"
 
+          def parse_date(val):
+              """Parse YYYY-MM-DD or DD-MM-YYYY or DD/MM/YYYY date strings."""
+              val = val.strip()
+              for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%m-%d-%Y", "%m/%d/%Y"):
+                  try:
+                      from datetime import datetime
+                      return datetime.strptime(val, fmt).date()
+                  except ValueError:
+                      continue
+              raise ValueError(f"Unrecognised date format '{val}'. Use YYYY-MM-DD.")
+
           # ── Load waivers from main branch CSV ────────────────────────────────
           waivers = []
           if os.path.exists(FETCHED_CSV) and os.path.getsize(FETCHED_CSV) > 0:
@@ -815,7 +826,7 @@ jobs:
                           break
 
                   if matched:
-                      expiry    = date.fromisoformat(matched["expiry"].strip())
+                      expiry    = parse_date(matched["expiry"])
                       days_left = (expiry - TODAY).days
 
                       if TODAY <= expiry:
@@ -852,7 +863,7 @@ jobs:
                       "Severity":      severity,
                       "Description":   problem,
                       "Expiry":        matched["expiry"] if matched else "",
-                      "Days_Left":     str((date.fromisoformat(matched["expiry"].strip()) - TODAY).days) if matched else "",
+                      "Days_Left":     str((parse_date(matched["expiry"]) - TODAY).days) if matched else "",
                       "Reason":        matched.get("reason", "") if matched else "",
                       "Approved_By":   matched.get("approved_by", "") if matched else "",
                       "Approved_Date": matched.get("approved_date", "") if matched else "",
