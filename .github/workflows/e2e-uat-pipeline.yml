@@ -1487,7 +1487,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          deploy_cmd=(sf project deploy start --target-org "$ORG_ALIAS" --wait 60 --json)
+          deploy_cmd=(sf project deploy start --target-org "$ORG_ALIAS" --json)
 
           if [[ -n "${DEPLOY_MANIFEST:-}" ]]; then
             deploy_cmd+=(--manifest "$DEPLOY_MANIFEST")
