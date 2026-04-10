@@ -105,51 +105,19 @@ jobs:
 
           echo "Using PROJECT_ID=$PROJECT_ID  JOB_ID=$JOB_ID"
 
-          # ── Token exchange ─────────────────────────────────────────────────
-          echo "--- Token exchange ---"
-          TOKEN_RESP=$(curl -s -X POST \
-            -H "Content-Type: application/json" \
-            -d "{\"accessKey\":\"$API_KEY\"}" \
-            "https://eu-robotic.copado.com/pace/v4/auth/login")
-          echo "Login response: $TOKEN_RESP"
-
-          SESSION_TOKEN=$(echo "$TOKEN_RESP" | jq -r '.token // .data.token // .accessToken // .data.accessToken // empty')
-
-          if [ -z "$SESSION_TOKEN" ]; then
-            echo "--- Trying cookie auth ---"
-            COOKIE_RESP=$(curl -s -c /tmp/crt_cookies.txt \
-              -H "Content-Type: application/json" \
-              -d "{\"accessKey\":\"$API_KEY\"}" \
-              "https://eu-robotic.copado.com/pace/v4/auth/login")
-            echo "Cookie login response: $COOKIE_RESP"
-            SESSION_TOKEN=$(echo "$COOKIE_RESP" | jq -r '.token // .data.token // empty')
-          fi
-
-          if [ -z "$SESSION_TOKEN" ]; then
-            echo "--- Trying x-access-key directly ---"
-            DIRECT_RESP=$(curl -s \
-              -H "x-access-key: $API_KEY" \
-              -H "Content-Type: application/json" \
-              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID")
-            echo "Direct x-access-key response: $DIRECT_RESP"
-            if echo "$DIRECT_RESP" | jq -e '.id' > /dev/null 2>&1; then
-              echo "✅ x-access-key works directly"
-              USE_DIRECT_KEY=true
-            fi
-          fi
+          # ── Auth: x-access-key header (POST /auth/login does not exist) ────
+          # The /pace/v4/auth/login endpoint returns 404 HTML on this instance.
+          # Copado's REST API accepts the Personal Access Key directly via the
+          # x-access-key header — no token exchange needed.
+          USE_DIRECT_KEY=true
+          echo "✅ Using x-access-key header for all requests"
 
           # ── Fetch job name ─────────────────────────────────────────────────
           echo "--- Fetching job info ---"
-          if [ "${USE_DIRECT_KEY}" = "true" ]; then
-            JOB_INFO=$(curl -s -H "x-access-key: $API_KEY" -H "Content-Type: application/json" \
-              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID")
-          elif [ -f /tmp/crt_cookies.txt ]; then
-            JOB_INFO=$(curl -s -b /tmp/crt_cookies.txt -H "Content-Type: application/json" \
-              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID")
-          else
-            JOB_INFO=$(curl -s -H "Authorization: Bearer $SESSION_TOKEN" -H "Content-Type: application/json" \
-              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID")
-          fi
+          JOB_INFO=$(curl -s \
+            -H "x-access-key: $API_KEY" \
+            -H "Content-Type: application/json" \
+            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID")
           echo "Job info response: $JOB_INFO"
 
           JOB_NAME=$(echo "$JOB_INFO" | jq -r '.name // "Unknown Job"')
@@ -158,16 +126,10 @@ jobs:
 
           # ── Trigger build ──────────────────────────────────────────────────
           echo "--- Triggering build ---"
-          if [ "${USE_DIRECT_KEY}" = "true" ]; then
-            RESPONSE=$(curl -s -X POST -H "x-access-key: $API_KEY" -H "Content-Type: application/json" \
-              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds")
-          elif [ -f /tmp/crt_cookies.txt ]; then
-            RESPONSE=$(curl -s -X POST -b /tmp/crt_cookies.txt -H "Content-Type: application/json" \
-              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds")
-          else
-            RESPONSE=$(curl -s -X POST -H "Authorization: Bearer $SESSION_TOKEN" -H "Content-Type: application/json" \
-              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds")
-          fi
+          RESPONSE=$(curl -s -X POST \
+            -H "x-access-key: $API_KEY" \
+            -H "Content-Type: application/json" \
+            "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds")
           echo "Trigger response: $RESPONSE"
 
           BUILD_ID=$(echo "$RESPONSE" | jq -r '.id // .data.id // empty')
@@ -188,16 +150,10 @@ jobs:
             ATTEMPT=$((ATTEMPT + 1))
             sleep 30
 
-            if [ "${USE_DIRECT_KEY}" = "true" ]; then
-              STATUS_RESP=$(curl -s -H "x-access-key: $API_KEY" -H "Content-Type: application/json" \
-                "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds/$BUILD_ID" || echo '{}')
-            elif [ -f /tmp/crt_cookies.txt ]; then
-              STATUS_RESP=$(curl -s -b /tmp/crt_cookies.txt -H "Content-Type: application/json" \
-                "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds/$BUILD_ID" || echo '{}')
-            else
-              STATUS_RESP=$(curl -s -H "Authorization: Bearer $SESSION_TOKEN" -H "Content-Type: application/json" \
-                "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds/$BUILD_ID" || echo '{}')
-            fi
+            STATUS_RESP=$(curl -s \
+              -H "x-access-key: $API_KEY" \
+              -H "Content-Type: application/json" \
+              "$BASE/projects/$PROJECT_ID/jobs/$JOB_ID/builds/$BUILD_ID" || echo '{}')
 
             STATUS=$(echo "$STATUS_RESP" | jq -r '.status // "UNKNOWN"')
             echo "Attempt $ATTEMPT/$MAX_ATTEMPTS — Status: $STATUS"
