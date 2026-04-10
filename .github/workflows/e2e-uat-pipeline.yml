@@ -135,6 +135,8 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    outputs:
+      has_delta: ${{ steps.delta.outputs.has_delta }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -602,6 +604,7 @@ jobs:
           fi
 
       - name: Install Salesforce Code Analyzer
+        if: steps.delta.outputs.has_delta == 'true'
         run: echo y | sf plugins install @salesforce/sfdx-scanner || npm install -g @salesforce/sfdx-scanner
 
       - name: Detect changed Salesforce files for SCA
@@ -759,7 +762,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   sca-sast-stage:
     name: SCA/SAST Stage
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && needs.salesforce-validation.outputs.has_delta == 'true' }}
     needs: [salesforce-validation]
     runs-on: ubuntu-latest
     permissions:
@@ -883,7 +886,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   automated-governance:
     name: Automated Hard Gates
-    if: ${{ github.event_name == 'pull_request' }}
+    if: ${{ github.event_name == 'pull_request' && needs.salesforce-validation.outputs.has_delta == 'true' }}
     needs: [salesforce-validation]
     runs-on: ubuntu-latest
     permissions:
@@ -955,6 +958,7 @@ jobs:
             });
 
       - name: Install Salesforce Scanner plugin
+        if: needs.salesforce-validation.outputs.has_delta == 'true'
         run: sf plugins install @salesforce/sfdx-scanner
 
       - name: Detect changed Salesforce files for SCA
@@ -1200,7 +1204,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   manual-validation:
     name: Manual Agent Validation (ReleaseGate)
-    if: ${{ github.event_name == 'pull_request' }}
+    if: ${{ github.event_name == 'pull_request' && needs.salesforce-validation.outputs.has_delta == 'true' }}
     needs: [automated-governance, sca-sast-stage]
     runs-on: ubuntu-latest
     environment:
