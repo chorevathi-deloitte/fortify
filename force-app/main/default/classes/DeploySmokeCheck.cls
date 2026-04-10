@@ -44,7 +44,6 @@ public with sharing class DeploySmokeCheck {
         return res;
     }
 
-    
     @TestVisible
     private static void assertIsoZuluOrThrow(String value) {
         if (!isIsoZulu(value)) {
