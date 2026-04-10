@@ -34,6 +34,8 @@ on:
       - ready_for_review
     paths:
       - force-app/**
+      - .github/workflows/e2e-uat-pipeline.yml
+      - .github/sf-scanner-waivers.json
 
   pull_request_review:
     types:
