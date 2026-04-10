@@ -410,16 +410,55 @@ jobs:
       - name: Install Salesforce Code Analyzer
         run: echo y | sf plugins install @salesforce/sfdx-scanner || npm install -g @salesforce/sfdx-scanner
 
+      - name: Detect changed Salesforce files for SCA
+        id: sca-targets
+        run: |
+          set -euo pipefail
+
+          # Get files changed in this PR compared to the base branch
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+
+          CHANGED_FILES=$(git diff --name-only --diff-filter=ACM "${BASE}...${HEAD}" \
+            | grep '^force-app/' \
+            | grep -E '\.(cls|trigger|js|html|css)$' \
+            || true)
+
+          if [[ -z "$CHANGED_FILES" ]]; then
+            echo "No scannable Salesforce files changed — skipping SCA."
+            echo "targets=" >> "$GITHUB_OUTPUT"
+            echo "has_targets=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Log each changed file
+          echo "Changed Salesforce files to scan:"
+          echo "$CHANGED_FILES"
+
+          # Build a comma-separated list for --target
+          TARGETS=$(echo "$CHANGED_FILES" | paste -sd ',' -)
+
+          # Summarise what component types were found
+          APEX=$(echo "$CHANGED_FILES" | grep -cE '\.(cls|trigger)$' || echo 0)
+          LWC=$(echo "$CHANGED_FILES"  | grep -cE '\.(js|html|css)$'  || echo 0)
+          echo ""
+          echo "Scan targets: ${APEX} Apex file(s), ${LWC} LWC/JS file(s)"
+
+          echo "targets=${TARGETS}" >> "$GITHUB_OUTPUT"
+          echo "has_targets=true"   >> "$GITHUB_OUTPUT"
+
       - name: Salesforce Code Analyzer
+        if: steps.sca-targets.outputs.has_targets == 'true'
         continue-on-error: true
         run: |
           sf scanner run \
-            --target "./force-app" \
+            --target "${{ steps.sca-targets.outputs.targets }}" \
             --format "csv" \
             --outfile "sfdx-report.csv" \
             --severity-threshold 3
 
       - name: Check scanner results against waivers
+        if: steps.sca-targets.outputs.has_targets == 'true'
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -660,6 +699,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -722,11 +763,41 @@ jobs:
       - name: Install Salesforce Scanner plugin
         run: sf plugins install @salesforce/sfdx-scanner
 
+      - name: Detect changed Salesforce files for SCA
+        id: sca-targets
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+
+          CHANGED_FILES=$(git diff --name-only --diff-filter=ACM "${BASE}...${HEAD}" \
+            | grep '^force-app/' \
+            | grep -E '\.(cls|trigger|js|html|css)$' \
+            || true)
+
+          if [[ -z "$CHANGED_FILES" ]]; then
+            echo "No scannable Salesforce files changed — skipping SCA."
+            echo "targets=" >> "$GITHUB_OUTPUT"
+            echo "has_targets=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Changed Salesforce files to scan:"
+          echo "$CHANGED_FILES"
+          TARGETS=$(echo "$CHANGED_FILES" | paste -sd ',' -)
+          APEX=$(echo "$CHANGED_FILES" | grep -cE '\.(cls|trigger)$' || echo 0)
+          LWC=$(echo "$CHANGED_FILES"  | grep -cE '\.(js|html|css)$'  || echo 0)
+          echo "Scan targets: ${APEX} Apex file(s), ${LWC} LWC/JS file(s)"
+
+          echo "targets=${TARGETS}" >> "$GITHUB_OUTPUT"
+          echo "has_targets=true"   >> "$GITHUB_OUTPUT"
+
       - name: Salesforce Code Analyzer
+        if: steps.sca-targets.outputs.has_targets == 'true'
         continue-on-error: true
         run: |
           sf scanner run \
-            --target "./force-app" \
+            --target "${{ steps.sca-targets.outputs.targets }}" \
             --format "csv" \
             --outfile "sfdx-report.csv" \
             --severity-threshold 3
