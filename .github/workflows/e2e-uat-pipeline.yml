@@ -186,17 +186,29 @@ jobs:
           full_text="$PR_BODY
           $comments"
 
-          line=$(echo "$full_text" | grep -iE '^\s*(tests?(\s+classes?)?)\s*:' | head -1 || true)
-          raw_classes=$(echo "$line" | sed 's/^[^:]*:[[:space:]]*//')
-          extracted=$(echo "$raw_classes" | tr ',' ' ' | xargs || true)
+          echo "════════════════════════════════════════════════════════════════"
+          echo "  TEST CLASS EXTRACTION — PR description + comments"
+          echo "════════════════════════════════════════════════════════════════"
+          echo ""
+          echo "Looking for lines matching:  'Tests: ClassName1, ClassName2'"
+          echo ""
 
-          if [[ -z "${extracted:-}" ]]; then
+          line=$(echo "$full_text" | grep -iE '^\s*(tests?(\s+classes?)?)\s*:' | head -1 || true)
+
+          if [[ -z "$line" ]]; then
+            echo "ℹ️  No 'Tests:' line found in PR description or comments."
+            echo "   → Will attempt to infer test classes from changed Apex files."
             echo "test_level=none" >> "$GITHUB_OUTPUT"
             echo "test_classes=" >> "$GITHUB_OUTPUT"
           else
+            echo "✅ Found test line: $line"
+            raw_classes=$(echo "$line" | sed 's/^[^:]*:[[:space:]]*//')
+            extracted=$(echo "$raw_classes" | tr ',' ' ' | xargs || true)
+            echo "   Extracted classes: $extracted"
             echo "test_level=RunSpecifiedTests" >> "$GITHUB_OUTPUT"
             echo "test_classes=$extracted" >> "$GITHUB_OUTPUT"
           fi
+          echo ""
 
       - name: Install sfdx-git-delta plugin
         run: |
@@ -305,6 +317,34 @@ jobs:
           echo "destructive_manifest=$destructive_manifest" >> "$GITHUB_OUTPUT"
           echo "apex_required=$apex_required" >> "$GITHUB_OUTPUT"
 
+          echo "════════════════════════════════════════════════════════════════"
+          echo "  DELTA ANALYSIS SUMMARY"
+          echo "════════════════════════════════════════════════════════════════"
+          echo ""
+          echo "Changed Apex classes (non-test):"
+          if [[ -n "$apex_changed_classes" ]]; then
+            echo "$apex_changed_classes" | tr ',' '\n' | sed 's/^/   → /'
+          else
+            echo "   (none)"
+          fi
+          echo ""
+          echo "Changed test classes (direct):"
+          if [[ -n "$changed_test_classes" ]]; then
+            echo "$changed_test_classes" | tr ',' '\n' | sed 's/^/   → /'
+          else
+            echo "   (none)"
+          fi
+          echo ""
+          echo "Inferred test classes (matched by naming convention *Test / *Tests / *TestClass):"
+          if [[ -n "$inferred_test_classes" ]]; then
+            echo "$inferred_test_classes" | tr ',' '\n' | sed 's/^/   → /'
+          else
+            echo "   (none — may use NoTestRun if no Apex changed)"
+          fi
+          echo ""
+          echo "Apex required: $apex_required"
+          echo "════════════════════════════════════════════════════════════════"
+
       - name: Validate test requirements
         env:
           APEX_REQUIRED: ${{ steps.delta.outputs.apex_required }}
@@ -334,6 +374,22 @@ jobs:
             | sed '/^[[:space:]]*$/d' | awk '!seen[$0]++' | paste -sd ',' -
           )
 
+          echo "════════════════════════════════════════════════════════════════"
+          echo "  TEST CLASS RESOLUTION"
+          echo "════════════════════════════════════════════════════════════════"
+          echo ""
+          echo "From PR description/comments : ${PR_TEST_CLASSES:-<none>}"
+          echo "Inferred from changed files  : ${INFERRED_TEST_CLASSES:-<none>}"
+          echo ""
+          if [[ -n "${all_test_classes:-}" ]]; then
+            echo "✅ Final test classes to run:"
+            echo "${all_test_classes}" | tr ',' '\n' | sed 's/^/   → /'
+          else
+            echo "ℹ️  No test classes — will use NoTestRun"
+          fi
+          echo "════════════════════════════════════════════════════════════════"
+          echo ""
+
           deploy_cmd=(sf project deploy validate --target-org "$ORG_ALIAS" --json)
 
           if [[ -n "${DEPLOY_MANIFEST:-}" ]]; then
@@ -359,6 +415,39 @@ jobs:
             deploy_cmd+=(--test-level NoTestRun)
           fi
 
+          # ── Pre-validation summary ────────────────────────────────────────────
+          echo "════════════════════════════════════════════════════════════════"
+          echo "  PR VALIDATION — Components to validate"
+          echo "════════════════════════════════════════════════════════════════"
+
+          if [[ -n "${DEPLOY_MANIFEST:-}" && -f "$DEPLOY_MANIFEST" ]]; then
+            echo ""
+            echo "📦 Components being validated (package.xml):"
+            grep -E '<members>|<name>' "$DEPLOY_MANIFEST" \
+              | sed 's/.*<members>\(.*\)<\/members>/   → \1/' \
+              | sed 's/.*<name>\(.*\)<\/name>/  [\1]/' \
+              || echo "   (empty or unreadable)"
+          else
+            echo "📦 Source dir: ${SOURCE_DIR}"
+          fi
+
+          if [[ -n "${DESTRUCTIVE_MANIFEST:-}" && -f "$DESTRUCTIVE_MANIFEST" ]]; then
+            echo ""
+            echo "🗑️  Components being DELETED (destructiveChanges.xml):"
+            grep -E '<members>|<name>' "$DESTRUCTIVE_MANIFEST" \
+              | sed 's/.*<members>\(.*\)<\/members>/   → \1/' \
+              | sed 's/.*<name>\(.*\)<\/name>/  [\1]/' \
+              || echo "   (empty or unreadable)"
+          fi
+
+          echo ""
+          echo "🧪 Test classes: ${all_test_classes:-NoTestRun}"
+          echo ""
+          echo "▶ Running command:"
+          echo "  ${deploy_cmd[*]}"
+          echo "════════════════════════════════════════════════════════════════"
+          echo ""
+
           set +e
           "${deploy_cmd[@]}" > deploy-output.json 2>deploy-stderr.log
           rc=$?
@@ -371,13 +460,21 @@ jobs:
             echo "--- status / message ---"
             jq -r '"Status: \(.status // "n/a")  Message: \(.message // "n/a")"' deploy-output.json 2>/dev/null || cat deploy-output.json
             echo "--- component failures ---"
-            jq -r '.result.details.componentFailures[]? | "[\(.componentType)] \(.fileName): \(.problem)"' deploy-output.json 2>/dev/null || true
+            jq -r '.result.details.componentFailures[]?
+              | "  ❌ [\(.componentType)] \(.fileName // .fullName // "unknown"):\(.lineNumber // "?")\n     \(.problem)"' \
+              deploy-output.json 2>/dev/null || true
             echo "--- test failures ---"
-            jq -r '.result.details.runTestResult.failures[]? | "\(.name).\(.methodName): \(.message)"' deploy-output.json 2>/dev/null || true
-            echo "--- coverage warnings ---"
-            jq -r '.result.details.runTestResult.codeCoverageWarnings[]? | .message' deploy-output.json 2>/dev/null || true
+            jq -r '.result.details.runTestResult.failures[]?
+              | "  ❌ \(.name).\(.methodName)\n     \(.message)"' \
+              deploy-output.json 2>/dev/null || true
+            echo "--- coverage failures (class-level) ---"
+            jq -r '.result.details.runTestResult.codeCoverageWarnings[]?
+              | "  ⚠️  \(.name // "unknown class"): \(.message)"' \
+              deploy-output.json 2>/dev/null || true
             exit 1
           fi
+
+          echo "✅ Validation passed."
 
       - name: Check Apex test coverage
         run: |
@@ -403,7 +500,23 @@ jobs:
           coverage=$(awk -v c="$covered" -v t="$total" 'BEGIN { printf "%.2f", (c/t)*100 }')
           below=$(awk -v cov="$coverage" -v req="$COVERAGE_THRESHOLD" 'BEGIN { print (cov+0 < req+0) ? 1 : 0 }')
 
-          echo "Coverage: $covered / $total lines = $coverage%"
+          echo "════════════════════════════════════════════════════════════════"
+          echo "  APEX COVERAGE REPORT"
+          echo "════════════════════════════════════════════════════════════════"
+          echo ""
+          echo "Per-class coverage:"
+          jq -r '.result.details.runTestResult.codeCoverage[]?
+            | ((.numLocations - .numLocationsNotCovered) / .numLocations * 100 | floor | tostring) as $pct
+            | if (.numLocations - .numLocationsNotCovered) / .numLocations * 100 < 75
+              then "  ❌ \(.name): \($pct)% (\(.numLocations - .numLocationsNotCovered)/\(.numLocations) lines)"
+              else "  ✅ \(.name): \($pct)% (\(.numLocations - .numLocationsNotCovered)/\(.numLocations) lines)"
+              end' \
+            deploy-output.json 2>/dev/null | sort || true
+
+          echo ""
+          echo "Overall: $covered / $total lines = $coverage%  (threshold: ${COVERAGE_THRESHOLD}%)"
+          echo "════════════════════════════════════════════════════════════════"
+
           if [[ "$below" -eq 1 ]]; then
             echo "::error::Coverage $coverage% is below required ${COVERAGE_THRESHOLD}%."
             exit 1
@@ -1324,6 +1437,39 @@ jobs:
             deploy_cmd+=(--test-level NoTestRun)
           fi
 
+          # ── Pre-deployment summary ────────────────────────────────────────────
+          echo "════════════════════════════════════════════════════════════════"
+          echo "  DEPLOYMENT — Components being deployed"
+          echo "════════════════════════════════════════════════════════════════"
+
+          if [[ -n "${DEPLOY_MANIFEST:-}" && -f "$DEPLOY_MANIFEST" ]]; then
+            echo ""
+            echo "📦 Components (package.xml):"
+            grep -E '<members>|<name>' "$DEPLOY_MANIFEST" \
+              | sed 's/.*<members>\(.*\)<\/members>/   → \1/' \
+              | sed 's/.*<name>\(.*\)<\/name>/  [\1]/' \
+              || echo "   (empty or unreadable)"
+          else
+            echo "📦 Source dir: ${SOURCE_DIR}"
+          fi
+
+          if [[ -n "${DESTRUCTIVE_MANIFEST:-}" && -f "$DESTRUCTIVE_MANIFEST" ]]; then
+            echo ""
+            echo "🗑️  Components being DELETED (destructiveChanges.xml):"
+            grep -E '<members>|<name>' "$DESTRUCTIVE_MANIFEST" \
+              | sed 's/.*<members>\(.*\)<\/members>/   → \1/' \
+              | sed 's/.*<name>\(.*\)<\/name>/  [\1]/' \
+              || echo "   (empty or unreadable)"
+          fi
+
+          echo ""
+          echo "🧪 Test classes: ${ALL_TEST_CLASSES:-NoTestRun}"
+          echo ""
+          echo "▶ Running command:"
+          echo "  ${deploy_cmd[*]}"
+          echo "════════════════════════════════════════════════════════════════"
+          echo ""
+
           set +e
           "${deploy_cmd[@]}" > deploy-output.json 2>deploy-stderr.log
           rc=$?
@@ -1336,13 +1482,40 @@ jobs:
             echo "--- status / message ---"
             jq -r '"Status: \(.status // "n/a")  Message: \(.message // "n/a")"' deploy-output.json 2>/dev/null || cat deploy-output.json
             echo "--- component failures ---"
-            jq -r '.result.details.componentFailures[]? | "[\(.componentType)] \(.fileName): \(.problem)"' deploy-output.json 2>/dev/null || true
+            jq -r '.result.details.componentFailures[]?
+              | "  ❌ [\(.componentType)] \(.fileName // .fullName // "unknown"):\(.lineNumber // "?")\n     \(.problem)"' \
+              deploy-output.json 2>/dev/null || true
             echo "--- test failures ---"
-            jq -r '.result.details.runTestResult.failures[]? | "\(.name).\(.methodName): \(.message)"' deploy-output.json 2>/dev/null || true
-            echo "--- coverage warnings ---"
-            jq -r '.result.details.runTestResult.codeCoverageWarnings[]? | .message' deploy-output.json 2>/dev/null || true
+            jq -r '.result.details.runTestResult.failures[]?
+              | "  ❌ \(.name).\(.methodName)\n     \(.message)"' \
+              deploy-output.json 2>/dev/null || true
+            echo "--- coverage failures (class-level) ---"
+            jq -r '.result.details.runTestResult.codeCoverageWarnings[]?
+              | "  ⚠️  \(.name // "unknown class"): \(.message)"' \
+              deploy-output.json 2>/dev/null || true
+            echo "--- per-class coverage ---"
+            jq -r '.result.details.runTestResult.codeCoverage[]?
+              | ((.numLocations - .numLocationsNotCovered) / .numLocations * 100 | floor | tostring) as $pct
+              | "  \(.name): \($pct)% (\(.numLocations - .numLocationsNotCovered)/\(.numLocations) lines)"' \
+              deploy-output.json 2>/dev/null | sort || true
             exit 1
           fi
+
+          echo "════════════════════════════════════════════════════════════════"
+          echo "  DEPLOYMENT RESULT"
+          echo "════════════════════════════════════════════════════════════════"
+          jq -r '"✅ Status: \(.result.status // "n/a")  | Components: \(.result.numberComponentsDeployed // 0) deployed, \(.result.numberComponentErrors // 0) errors"' \
+            deploy-output.json 2>/dev/null || true
+          echo ""
+          echo "Per-class coverage:"
+          jq -r '.result.details.runTestResult.codeCoverage[]?
+            | ((.numLocations - .numLocationsNotCovered) / .numLocations * 100 | floor | tostring) as $pct
+            | if (.numLocations - .numLocationsNotCovered) / .numLocations * 100 < 75
+              then "  ❌ \(.name): \($pct)% (\(.numLocations - .numLocationsNotCovered)/\(.numLocations) lines)"
+              else "  ✅ \(.name): \($pct)% (\(.numLocations - .numLocationsNotCovered)/\(.numLocations) lines)"
+              end' \
+            deploy-output.json 2>/dev/null | sort || true
+          echo "════════════════════════════════════════════════════════════════"
 
           # ── Capture rollback manifest ─────────────────────────────────────────
           # Record what was deployed so the rollback job can invert it:
