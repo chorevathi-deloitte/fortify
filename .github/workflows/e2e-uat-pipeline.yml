@@ -837,7 +837,12 @@ jobs:
                       waivers.append(row)
 
           print(f"Loaded {len(waivers)} active waiver(s) from main branch.")
-          print(f"Waiver source: main branch (.github/sf-scanner-waivers.csv)\n")
+          print(f"Waiver source: main branch (.github/sf-scanner-waivers.csv)")
+
+          # Print loaded waivers for visibility
+          for i, w in enumerate(waivers):
+              print(f"  Waiver[{i}]: rule='{w.get('rule','')}' file_pattern='{w.get('file_pattern','')}' expiry='{w.get('expiry','')}' status='{w.get('status','')}'")
+          print()
 
           # ── Process scanner violations ────────────────────────────────────────
           results         = []
@@ -854,6 +859,8 @@ jobs:
                   problem   = row.get("Problem",  row.get("Description", row.get("problem", ""))).strip()
                   line      = row.get("Line",     row.get("line", "")).strip()
 
+                  print(f"  Checking violation: rule='{rule}' file='{os.path.basename(file_path)}'")
+
                   # Match against waivers: rule substring + file_pattern substring + optional message
                   matched = None
                   for w in waivers:
@@ -863,6 +870,7 @@ jobs:
                       rule_match = w_rule and w_rule in rule
                       file_match = w_file and w_file in file_path
                       msg_match  = (not w_msg) or (w_msg.lower() in problem.lower())
+                      print(f"    vs waiver rule='{w_rule}' file_pattern='{w_file}' → rule_match={rule_match} file_match={file_match} msg_match={msg_match}")
                       if rule_match and file_match and msg_match:
                           matched = w
                           break
