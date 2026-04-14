@@ -1,0 +1,10 @@
+{
+  "pr_number": "48",
+  "deployed_commit": "a665a3f433d3bc7044e9fa028f243c9ba5985962",
+  "delta_from": "e2ba8e745f9d67cb0059dd1f7b8755856e50a1c1",
+  "deployed_at": "2026-04-14T09:11:47Z",
+  "deployed_by": "chorevathi-deloitte",
+  "org_alias": "uat",
+  "run_id": "24390761467",
+  "run_url": "https://github.com/mukeshranadeloitte/crt_repo/actions/runs/24390761467"
+}
