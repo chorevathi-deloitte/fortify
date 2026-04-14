@@ -66,7 +66,6 @@ public with sharing class CoverageDemoService {
     }
 
 
-    
     private static Integer clamp(Integer v, Integer minV, Integer maxV) {
         if (v == null) return minV;
         if (v < minV) return minV;

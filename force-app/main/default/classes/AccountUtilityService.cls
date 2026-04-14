@@ -17,8 +17,6 @@ public with sharing class AccountUtilityService {
         if (accountIds == null || accountIds.isEmpty() || String.isBlank(appendText)) {
             return 0;
         }
-
-
         
         List<Account> accountsToUpdate = [
             SELECT Id, Description
