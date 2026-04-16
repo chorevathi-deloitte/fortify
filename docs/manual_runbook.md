@@ -9,16 +9,27 @@ This runbook guides the approver through the manual validation step (`ReleaseGat
 This step activates **after** all automated checks pass:
 
 - ✅ Salesforce PR validation (check-only deploy)
-- ✅ Apex test coverage ≥ 75%
-- ✅ Salesforce Code Analyzer — no severity-3+ findings blocking deploy
+- ✅ Apex test coverage ≥ 85% (configurable via `COVERAGE_THRESHOLD` variable, default: 85)
+- ✅ Salesforce Code Analyzer — no expired waivers blocking deploy (in `enforce` mode)
 - ✅ SCA dependency audit — no high-severity vulnerabilities
 - ✅ CheckMarx / Fortify scans (if configured)
 
 A GitHub environment approval request is sent to designated reviewers. This document describes what to verify before approving.
 
+| # | Job | Depends On | Description |
+|---|-----|------------|-------------|
+| 2 | `salesforce-validation` | `setup` | Requests reviewers (`ss10del`, `chorevathi-deloitte`), validates delta, runs SF Code Analyzer |
+| 3 | `sca-sast-stage` | `setup` | npm dependency audit (runs in **parallel** with Job 2) |
+| 4 | `automated-governance` | `salesforce-validation` | Apex coverage + destructive changes guard |
+| 5 | `checkmarx-sast` | `setup` | CheckMarx SAST (runs in **parallel** with Jobs 2 & 3) |
+| 6 | `fortify-sast-dast` | `setup` | Fortify SAST/DAST (runs in **parallel** with Jobs 2, 3 & 5) |
+| 7 | `manual-validation` | Jobs 2–6 (all must pass) | ReleaseGate human approval |
+
+> Jobs 2, 3, 5, and 6 all run in **parallel** from Job 1 (`setup`). Job 4 runs after Job 2.
+
 ---
 
-## Pre-Approval Checklist
+
 
 ### 1. Review the Pull Request
 
@@ -40,7 +51,7 @@ Go to the **Actions** run for this PR and download/review:
 
 ### 3. Check Test Coverage
 
-- [ ] Apex test coverage is ≥ 75% per class (enforced by platform — deployment will fail if not met)
+- [ ] Apex test coverage is ≥ 85% per class (configurable via `COVERAGE_THRESHOLD`; enforced by platform — deployment will fail if not met)
 - [ ] The right test classes are being run (verify in the `Validate deploy` step logs)
 
 ### 4. Destructive Changes
