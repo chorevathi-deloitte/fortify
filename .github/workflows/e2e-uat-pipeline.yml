@@ -135,6 +135,7 @@ jobs:
   salesforce-validation:
     name: Salesforce PR validation
     if: ${{ github.event_name == 'pull_request' }}
+    needs: [setup]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -1061,8 +1062,8 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   sca-sast-stage:
     name: SCA/SAST Stage
-    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && needs.salesforce-validation.outputs.has_delta == 'true' }}
-    needs: [salesforce-validation]
+    if: ${{ github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch' }}
+    needs: [setup]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1314,8 +1315,8 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   checkmarx-sast:
     name: CheckMarx AST Scan
-    if: ${{ github.event_name != 'pull_request_review' && needs.setup.outputs.run-checkmarx == 'true' && needs.sca-sast-stage.result == 'success' }}
-    needs: [setup, sca-sast-stage]
+    if: ${{ github.event_name != 'pull_request_review' && needs.setup.outputs.run-checkmarx == 'true' }}
+    needs: [setup]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1358,8 +1359,8 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   fortify-sast-dast:
     name: Fortify on Demand Scan
-    if: ${{ github.event_name != 'pull_request_review' && needs.setup.outputs.run-fortify == 'true' && needs.sca-sast-stage.result == 'success' }}
-    needs: [setup, sca-sast-stage]
+    if: ${{ github.event_name != 'pull_request_review' && needs.setup.outputs.run-fortify == 'true' }}
+    needs: [setup]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -1503,8 +1504,12 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────────
   manual-validation:
     name: Manual Agent Validation (ReleaseGate)
-    if: ${{ github.event_name == 'pull_request' && needs.salesforce-validation.outputs.has_delta == 'true' }}
-    needs: [automated-governance, sca-sast-stage]
+    if: |
+      ${{ github.event_name == 'pull_request' &&
+          needs.salesforce-validation.outputs.has_delta == 'true' &&
+          !contains(needs.*.result, 'failure') &&
+          !contains(needs.*.result, 'cancelled') }}
+    needs: [salesforce-validation, sca-sast-stage, checkmarx-sast, fortify-sast-dast, automated-governance]
     runs-on: ubuntu-latest
     environment:
       name: ReleaseGate
