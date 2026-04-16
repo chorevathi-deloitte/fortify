@@ -145,11 +145,7 @@ jobs:
       has_delta: ${{ steps.delta.outputs.has_delta }}
     steps:
       - name: Request PR reviewers and notify
-        # Only request reviewers on PR open/reopen/ready_for_review — not on every push
-        if: >-
-          github.event.action == 'opened' ||
-          github.event.action == 'reopened' ||
-          github.event.action == 'ready_for_review'
+        # Run on every PR event (open, reopen, push/sync, ready_for_review)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
