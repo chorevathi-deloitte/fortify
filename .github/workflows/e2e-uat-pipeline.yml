@@ -1566,27 +1566,7 @@ jobs:
           category: fortify-dast
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # JOB 7 — Manual Agent Validation (ReleaseGate environment)
-  # Human approval gate after automated governance + SCA pass.
-  # ─────────────────────────────────────────────────────────────────────────────
-  manual-validation:
-    name: Manual Agent Validation (ReleaseGate)
-    if: |
-      ${{ github.event_name == 'pull_request' &&
-          needs.salesforce-validation.outputs.has_delta == 'true' &&
-          !contains(needs.*.result, 'failure') &&
-          !contains(needs.*.result, 'cancelled') }}
-    needs: [salesforce-validation, sca-sast-stage, checkmarx-sast, fortify-sast-dast, automated-governance]
-    runs-on: ubuntu-latest
-    environment:
-      name: ReleaseGate
-      url: ${{ github.server_url }}/${{ github.repository }}/blob/main/docs/manual_runbook.md
-    steps:
-      - name: Log approval
-        run: echo "Manual validation complete. Releasing robots."
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # JOB 8 — Approval + Merge Gate
+  # JOB 7 — Approval + Merge Gate
   # Triggers on PR review approval. Verifies approval is for the latest SHA,
   # checks all required jobs passed (ANY success, not most-recent), then merges.
   # ─────────────────────────────────────────────────────────────────────────────

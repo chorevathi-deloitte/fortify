@@ -1,20 +1,18 @@
 # Manual Runbook — UAT Deployment Gate
 
-This runbook guides the approver through the manual validation step (`ReleaseGate`) before a PR is auto-merged and deployed to the UAT Salesforce org.
+This runbook guides the approver through the PR review and deployment process for the UAT Salesforce org.
 
 ---
 
 ## When Is This Runbook Used?
 
-This step activates **after** all automated checks pass:
+The automated pipeline handles all checks and gates. Human action is only required to:
+1. **Review and approve the PR** in GitHub (triggers merge + deploy)
+2. **Trigger a rollback** if a deployed change needs reverting
 
-- ✅ Salesforce PR validation (check-only deploy)
-- ✅ Apex test coverage ≥ 85% (configurable via `COVERAGE_THRESHOLD` variable, default: 85)
-- ✅ Salesforce Code Analyzer — no expired waivers blocking deploy (in `enforce` mode)
-- ✅ SCA dependency audit — no high-severity vulnerabilities
-- ✅ CheckMarx / Fortify scans (if configured)
+> ℹ️ The `ReleaseGate` manual approval step has been removed. The PR review approval (`ss10del` / `chorevathi-deloitte`) is the single human gate before deployment.
 
-A GitHub environment approval request is sent to designated reviewers. This document describes what to verify before approving.
+## Automated Jobs Summary
 
 | # | Job | Depends On | Description |
 |---|-----|------------|-------------|
@@ -23,13 +21,12 @@ A GitHub environment approval request is sent to designated reviewers. This docu
 | 4 | `automated-governance` | `salesforce-validation` | Apex coverage + destructive changes guard |
 | 5 | `checkmarx-sast` | `setup` | CheckMarx SAST (runs in **parallel** with Jobs 2 & 3) |
 | 6 | `fortify-sast-dast` | `setup` | Fortify SAST/DAST (runs in **parallel** with Jobs 2, 3 & 5) |
-| 7 | `manual-validation` | Jobs 2–6 (all must pass) | ReleaseGate human approval |
 
-> Jobs 2, 3, 5, and 6 all run in **parallel** from Job 1 (`setup`). Job 4 runs after Job 2.
+> Jobs 2, 3, 5, and 6 all run in **parallel** from Job 1 (`setup`). Job 4 runs after Job 2. Once all pass, the PR is ready for human review/approval.
 
 ---
 
-
+## Pre-Approval Checklist
 
 ### 1. Review the Pull Request
 
@@ -70,30 +67,34 @@ If `destructiveChanges.xml` is present:
 
 ---
 
-## How to Approve
+## How to Approve a PR for Deployment
 
-1. Open the GitHub Actions run for this PR
-2. Navigate to the **Manual Agent Validation (ReleaseGate)** job
-3. Click **Review deployments**
-4. Select the `ReleaseGate` environment
-5. Add a comment (optional but recommended)
-6. Click **Approve and deploy**
+Once all automated checks are green:
 
-After approval, the pipeline will wait for a PR review with state `APPROVED` to trigger the merge and deploy jobs.
+1. Open the PR on GitHub
+2. Review the **Artifacts** from the Actions run (delta package, scanner reports)
+3. Click **Approve** on the PR (as `ss10del` or `chorevathi-deloitte`)
+
+The `approval-merge-gate` job triggers automatically on your approval and will:
+- Verify the approval is for the latest commit SHA (stale approvals are rejected)
+- Confirm all required checks passed
+- Auto-merge the PR
+- Deploy to UAT org
+- Trigger CRT smoke tests
 
 ---
 
-## How to Reject
+## How to Reject a PR
 
-Click **Reject** on the ReleaseGate approval. This cancels the workflow run. The developer must push a new commit or re-open the PR review cycle.
+Request changes on the PR in GitHub. The developer must address the feedback, push a new commit, and the pipeline will re-run automatically.
 
-Leave a comment explaining the rejection reason so the developer can act on it.
+Leave a review comment explaining the rejection reason so the developer can act on it.
 
 ---
 
 ## Post-Deployment Verification
 
-After the deploy completes (Job 9), verify in UAT:
+After the deploy completes (Job 8), verify in UAT:
 
 - [ ] Smoke test the deployed components manually or via CRT
 - [ ] Check Salesforce Setup → Deployment Status for any warnings

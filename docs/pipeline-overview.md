@@ -23,8 +23,7 @@ pull_request (force-app/**)
          │                │
          └────────┬────────┘
                   ▼
-           [7] manual-validation
-               (ReleaseGate — human approval)
+           PR reviewer approves → pull_request_review event fires
 
 pull_request_review (APPROVED)
         │
@@ -53,11 +52,10 @@ workflow_dispatch (action=rollback)
 | 4 | `automated-governance` | PR | `salesforce-validation` | Apex coverage (≥ COVERAGE_THRESHOLD, default 85%) + destructive-changes guard |
 | 5 | `checkmarx-sast` | PR / dispatch | `setup` | CheckMarx AST SAST scan (conditional on `CX_CLIENT_SECRET`) |
 | 6 | `fortify-sast-dast` | PR / dispatch | `setup` | Fortify SAST + optional DAST (conditional on `FOD_CLIENT_SECRET`) |
-| 7 | `manual-validation` | PR | Jobs 2–6 (all) | Human approval gate via `ReleaseGate` environment |
-| 8 | `approval-merge-gate` | PR review APPROVED | — | Stale-approval guard + required-checks gate + auto-merge |
-| 9 | `deploy-after-merge` | PR review APPROVED | `approval-merge-gate` | Real deploy from merge commit to UAT org |
-| 10 | `trigger-crt-tests` | PR review APPROVED | `deploy-after-merge` | Trigger Copado Robotic Testing job |
-| 11 | `rollback` | `workflow_dispatch` (action=rollback) | — | Revert last deployment via reverse delta |
+| 7 | `approval-merge-gate` | PR review APPROVED | — | Stale-approval guard + required-checks gate + auto-merge |
+| 8 | `deploy-after-merge` | PR review APPROVED | `approval-merge-gate` | Real deploy from merge commit to UAT org |
+| 9 | `trigger-crt-tests` | PR review APPROVED | `deploy-after-merge` | Trigger Copado Robotic Testing job |
+| 10 | `rollback` | `workflow_dispatch` (action=rollback) | — | Revert last deployment via reverse delta |
 
 ---
 
@@ -65,9 +63,9 @@ workflow_dispatch (action=rollback)
 
 | Event | Condition | Jobs Activated |
 |-------|-----------|----------------|
-| `pull_request` | Opened/updated/synchronised targeting `uat`; files under `force-app/**` or workflow/waivers changed | 1–7 |
-| `pull_request_review` | Review submitted with state `APPROVED` | 8–10 |
-| `workflow_dispatch` | Manual run; `scanner` input (`checkmarx / fortify / all`), `action` input (`deploy / rollback`) | 1, 3, 5, 6 (or 11 for rollback) |
+| `pull_request` | Opened/updated/synchronised targeting `uat`; files under `force-app/**` or workflow/waivers changed | 1–6 |
+| `pull_request_review` | Review submitted with state `APPROVED` | 7–9 |
+| `workflow_dispatch` | Manual run; `scanner` input (`checkmarx / fortify / all`), `action` input (`deploy / rollback`) | 1, 3, 5, 6 (or 10 for rollback) |
 
 ---
 
