@@ -34,7 +34,7 @@ Create a workflow named `UAT End-to-End Pipeline` with the following characteris
 - Triggers: `pull_request` only
 - **Outputs:** `has_delta` (bool) — set `true` if `package/package.xml` or `destructiveChanges/destructiveChanges.xml` contains members
 - Steps:
-  1. checkout (fetch-depth: 0) → setup-node 20 → npm install → install Salesforce CLI
+  1. checkout (fetch-depth: 0) → setup-node 20 → **bootstrap `package.json` if missing** (writes full standard Salesforce `package.json` with eslint/prettier/jest/husky devDependencies via bash heredoc) → npm install → install Salesforce CLI
   2. Authenticate org from `secrets.CRT_UAT_AUTHURL`
   3. Extract test classes from PR body + comments (pattern: `Tests: Class1, Class2`)
   4. Install `sfdx-git-delta` → build delta package → upload delta artifact
@@ -63,6 +63,7 @@ Create a workflow named `UAT End-to-End Pipeline` with the following characteris
 - `needs: [setup]` (runs in **parallel** with Jobs 2, 5, 6)
 - **Condition:** `pull_request` or `workflow_dispatch`
 - Runs `npm audit --json`, checks against `.github/sca-waivers.json`, fails on unwaived/expired violations
+- **package.json bootstrap:** same guard as Job 2 — if no `package.json` exists a standard one is created before `npm install` so `npm audit` does not ENOENT
 
 **Job 4 — `automated-governance`**: Automated Hard Gates
 - `needs: [salesforce-validation]`
