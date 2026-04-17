@@ -1004,11 +1004,22 @@ jobs:
                       w_rule = w.get("rule", "").strip()
                       w_file = w.get("file_pattern", "").strip()
                       w_msg  = w.get("message_contains", "").strip()
-                      # blank rule or '*' = global component waiver (any rule for this file)
+                      # blank/`*` rule  = global component waiver (any rule for this file)
+                      # blank/`*` file  = global rule waiver (this rule for any file)
+                      # blank/`*` both  = waive everything (use with extreme caution)
                       rule_match = (not w_rule or w_rule == "*") or (w_rule in rule)
-                      file_match = w_file and w_file in file_path
+                      file_match = (not w_file or w_file == "*") or (w_file in file_path)
                       msg_match  = (not w_msg) or (w_msg.lower() in problem.lower())
-                      waiver_type = "GLOBAL" if (not w_rule or w_rule == "*") else "RULE"
+                      is_global_rule = (not w_rule or w_rule == "*")
+                      is_global_file = (not w_file or w_file == "*")
+                      if is_global_rule and is_global_file:
+                          waiver_type = "GLOBAL ALL"
+                      elif is_global_rule:
+                          waiver_type = "GLOBAL COMPONENT"
+                      elif is_global_file:
+                          waiver_type = "GLOBAL RULE"
+                      else:
+                          waiver_type = "SPECIFIC"
                       print(f"    vs waiver [{waiver_type}] rule='{w_rule}' file_pattern='{w_file}' → rule_match={rule_match} file_match={file_match} msg_match={msg_match}")
                       if rule_match and file_match and msg_match:
                           matched = w
@@ -1019,8 +1030,18 @@ jobs:
                       days_left = (expiry - TODAY).days
 
                       if TODAY <= expiry:
-                          is_global = not matched.get("rule","").strip() or matched.get("rule","").strip() == "*"
-                          waiver_label = "GLOBAL COMPONENT WAIVER" if is_global else "WAIVED"
+                          m_rule = matched.get("rule","").strip()
+                          m_file = matched.get("file_pattern","").strip()
+                          is_global_rule = not m_rule or m_rule == "*"
+                          is_global_file = not m_file or m_file == "*"
+                          if is_global_rule and is_global_file:
+                              waiver_label = "GLOBAL ALL WAIVER"
+                          elif is_global_rule:
+                              waiver_label = "GLOBAL COMPONENT WAIVER"
+                          elif is_global_file:
+                              waiver_label = "GLOBAL RULE WAIVER"
+                          else:
+                              waiver_label = "WAIVED"
                           if days_left <= WARN_DAYS:
                               status = "WAIVED_EXPIRING_SOON"
                               near_expiry += 1

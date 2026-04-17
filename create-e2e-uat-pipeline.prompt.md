@@ -145,7 +145,15 @@ ApexDoc,MyClass.cls,,3,10-05-2026,Reason here. Tracked in PROJ-123.,jane-techlea
 | `status` | ✅ | `ACTIVE` or `REVOKED` (keep revoked rows for audit trail — never delete) |
 
 Comment rows starting with `#` are ignored.
-**Component-level global waiver:** set `rule` to blank or `*` — pipeline logs `✅ GLOBAL COMPONENT WAIVER` for every violation in that file. Same expiry enforcement applies.
+
+**Waiver types (determined by `rule` and `file_pattern` wildcards):**
+
+| Type | `rule` | `file_pattern` | Effect | Log Label |
+|------|--------|----------------|--------|-----------|
+| Specific | `ApexDoc` | `MyClass.cls` | Waive ApexDoc for MyClass.cls only | `WAIVED` |
+| Global Component | `*` or blank | `MyClass.cls` | Waive ALL rules for MyClass.cls | `GLOBAL COMPONENT WAIVER` |
+| Global Rule | `ApexDoc` | `*` or blank | Waive ApexDoc for ALL files | `GLOBAL RULE WAIVER` |
+| Global All | `*` or blank | `*` or blank | Waive ALL rules for ALL files ⚠️ | `GLOBAL ALL WAIVER` |
 Status values: `WAIVED` (active, >30d), `WAIVED_EXPIRING_SOON` (≤30d), `VIOLATION` (no waiver), `EXPIRED_WAIVER` (past expiry — fails pipeline in enforce mode).
 Results written to `sca-governance-report.csv` (includes Days_Left, Approved_Date columns).
 

@@ -247,8 +247,8 @@ ApexDoc,MyClass.cls,,3,10-05-2026,Refactoring in progress. Tracked in PROJ-123.,
 
 | Column | Required | Description |
 |--------|----------|-------------|
-| `rule` | ✅ | Rule name substring match (e.g. `ApexDoc`). **Use blank or `*` for a component-level global waiver (all rules).** |
-| `file_pattern` | ✅ | Filename substring match (e.g. `MyClass.cls`) |
+| `rule` | ✅ | Rule name substring match (e.g. `ApexDoc`). **Use blank or `*` for a global component waiver (all rules for this file).** |
+| `file_pattern` | ✅ | Filename substring match (e.g. `MyClass.cls`). **Use blank or `*` for a global rule waiver (this rule for all files).** |
 | `message_contains` | ⬜ | Optional violation message substring to narrow match |
 | `severity_threshold` | ⬜ | Only waive at this severity or above (blank = any) |
 | `expiry` | ✅ | DD-MM-YYYY (preferred); also accepts DD/MM/YYYY and YYYY-MM-DD |
@@ -258,7 +258,14 @@ ApexDoc,MyClass.cls,,3,10-05-2026,Refactoring in progress. Tracked in PROJ-123.,
 | `ticket` | ✅ | Jira/GitHub issue ID |
 | `status` | ✅ | `ACTIVE` or `REVOKED` (keep revoked rows for audit trail — never delete) |
 
-**Component-level global waiver:** Set `rule` to blank or `*` to waive ALL violations for a class/LWC until expiry. Pipeline logs `✅ GLOBAL COMPONENT WAIVER` in the output. Same expiry governance applies.
+**Waiver types (determined by `rule` and `file_pattern` wildcards):**
+
+| Type | `rule` | `file_pattern` | Effect | Log Label |
+|------|--------|----------------|--------|-----------|
+| Specific | `ApexDoc` | `MyClass.cls` | Waive ApexDoc for MyClass.cls only | `WAIVED` |
+| Global Component | `*` or blank | `MyClass.cls` | Waive ALL rules for MyClass.cls | `GLOBAL COMPONENT WAIVER` |
+| Global Rule | `ApexDoc` | `*` or blank | Waive ApexDoc for ALL files | `GLOBAL RULE WAIVER` |
+| Global All | `*` or blank | `*` or blank | Waive ALL rules for ALL files ⚠️ | `GLOBAL ALL WAIVER` |
 
 Comment rows starting with `#` are ignored.
 
