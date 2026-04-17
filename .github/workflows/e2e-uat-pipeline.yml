@@ -224,6 +224,10 @@ jobs:
       - name: Install npm dependencies
         run: |
           set -euo pipefail
+          if [[ ! -f package.json ]]; then
+            echo "ℹ️  No package.json found — creating minimal package.json for pipeline tooling."
+            echo '{"name":"salesforce-project","version":"1.0.0","private":true}' > package.json
+          fi
           if [[ -f package-lock.json ]]; then
             npm ci
           else
@@ -1155,6 +1159,10 @@ jobs:
       - name: Install dependencies
         run: |
           set -euo pipefail
+          if [[ ! -f package.json ]]; then
+            echo "ℹ️  No package.json found — creating minimal package.json for pipeline tooling."
+            echo '{"name":"salesforce-project","version":"1.0.0","private":true}' > package.json
+          fi
           if [[ -f package-lock.json ]]; then
             npm ci
           else
@@ -1698,6 +1706,10 @@ jobs:
       - name: Install npm dependencies
         run: |
           set -euo pipefail
+          if [[ ! -f package.json ]]; then
+            echo "ℹ️  No package.json found — creating minimal package.json for pipeline tooling."
+            echo '{"name":"salesforce-project","version":"1.0.0","private":true}' > package.json
+          fi
           if [[ -f package-lock.json ]]; then
             npm ci
           else
@@ -2446,6 +2458,10 @@ jobs:
       - name: Install npm dependencies
         run: |
           set -euo pipefail
+          if [[ ! -f package.json ]]; then
+            echo "ℹ️  No package.json found — creating minimal package.json for pipeline tooling."
+            echo '{"name":"salesforce-project","version":"1.0.0","private":true}' > package.json
+          fi
           if [[ -f package-lock.json ]]; then npm ci; else npm install; fi
 
       - name: Install Salesforce CLI
