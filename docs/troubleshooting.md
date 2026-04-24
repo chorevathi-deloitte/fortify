@@ -189,6 +189,18 @@ VULN_COUNT=$(jq '[.vulnerabilities // {} | to_entries[] | .value | select(.sever
 
 ---
 
+### `npm error code ETARGET` — No matching version found for `@salesforce/eslint-plugin-aura@^2.4.0`
+
+**Cause:** When regenerating the workflow from `create-e2e-uat-pipeline.prompt.md` in a new project, an AI agent used an outdated/non-existent package version for `@salesforce/eslint-plugin-aura`. Version `^2.4.0` does not exist on npm.
+
+**Resolution:** The updated prompt now includes the **Canonical `package.json` devDependencies** section with pinned versions. Regenerate the workflow using the updated prompt. The correct version is:
+```
+"@salesforce/eslint-plugin-aura": "^3.0.0"
+```
+If you already have a generated workflow, locate the `bootstrap package.json` step and replace `^2.4.0` with `^3.0.0`.
+
+---
+
 ## Log Locations
 
 | Information | Where to Find |
