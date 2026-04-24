@@ -170,6 +170,25 @@ deploy_cmd+=(--test-level AllLocalTests)
 
 ---
 
+### `SyntaxError: invalid syntax` in `check-npm-waivers.py` (line: `if [ -f ... ]`)
+
+**Cause:** When regenerating the workflow from `create-e2e-uat-pipeline.prompt.md` in a new project, an AI agent incorrectly generated a Python script via `cat > check-npm-waivers.py << 'PYTHON_SCRIPT'` and placed a bash `if [ -f ... ]` guard **inside** the Python heredoc. Python then fails to parse bash syntax.
+
+**Root cause:** The AI agent invented a Python-based waiver checker instead of using the correct pure-bash implementation.
+
+**Resolution:** Delete the generated workflow and re-run the prompt. The updated prompt (rule 9, 10, 12) now explicitly prevents this. If regeneration still produces Python, manually replace the `Run dependency SCA gate with waiver support` step with the pure-bash version from `.github/workflows/e2e-uat-pipeline.yml` in this reference repo. The correct pattern is:
+```bash
+WAIVER_FILE=".github/sca-waivers.json"
+TODAY=$(date -u +%Y-%m-%d)
+npm audit --json --audit-level=high > audit-output.json 2>/dev/null || true
+VULN_COUNT=$(jq '[.vulnerabilities // {} | to_entries[] | .value | select(.severity == "high" or .severity == "critical")] | length' audit-output.json 2>/dev/null || echo 0)
+# ... bash waiver loop using jq (no Python)
+```
+
+**Never** put bash `if [ ... ]; then` inside a `<< 'HEREDOC'` block — it will be interpreted as code in the target language, not bash.
+
+---
+
 ## Log Locations
 
 | Information | Where to Find |
