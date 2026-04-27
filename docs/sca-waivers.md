@@ -72,13 +72,14 @@ Developer → PR against main → Tech Lead approval → merge into main
 
 ```csv
 rule,file_pattern,message_contains,severity_threshold,expiry,reason,approved_by,approved_date,ticket,status
-ApexDoc,MyClass.cls,,3,2026-05-10,Reason here. Tracked in PROJ-123.,jane-techlead,2026-04-10,PROJ-123,ACTIVE
+ApexDoc,MyClass.cls,,3,10-05-2026,Reason here. Tracked in PROJ-123.,jane-techlead,10-04-2026,PROJ-123,ACTIVE
+*,MyLegacyClass.cls,,3,10-05-2026,Full component waiver — legacy rewrite in progress. Tracked in PROJ-999.,jane-techlead,10-04-2026,PROJ-999,ACTIVE
 ```
 
 | Column | Required | Description |
 |--------|----------|-------------|
-| `rule` | ✅ | Rule name substring match (e.g. `ApexDoc`) |
-| `file_pattern` | ✅ | Filename substring match (e.g. `MyClass.cls`) |
+| `rule` | ✅ | Rule name substring match (e.g. `ApexDoc`). **Use blank or `*` to waive ALL rules for the component (global component waiver).** |
+| `file_pattern` | ✅ | Filename substring match (e.g. `MyClass.cls` or `myLWC`). **Use blank or `*` to waive this rule across ALL files (global rule waiver).** |
 | `message_contains` | ⬜ | Optional substring of violation message to narrow match |
 | `severity_threshold` | ⬜ | Only waive at this severity or above (blank = any) |
 | `expiry` | ✅ | DD-MM-YYYY preferred (also accepts DD/MM/YYYY and YYYY-MM-DD) — pipeline **FAILS** after this date (in `enforce` mode) |
@@ -87,6 +88,61 @@ ApexDoc,MyClass.cls,,3,2026-05-10,Reason here. Tracked in PROJ-123.,jane-techlea
 | `approved_date` | ✅ | Approval date `YYYY-MM-DD` |
 | `ticket` | ✅ | Jira/GitHub issue ID |
 | `status` | ✅ | `ACTIVE` or `REVOKED` |
+
+---
+
+### Waiver Types
+
+The pipeline supports 4 waiver scopes — determined by whether `rule` and `file_pattern` use a wildcard (`*` or blank):
+
+| Type | `rule` | `file_pattern` | Effect | Log Label |
+|------|--------|----------------|--------|-----------|
+| **Specific** | `ApexDoc` | `MyClass.cls` | Waive ApexDoc for MyClass.cls only | `WAIVED` |
+| **Global Component** | `*` or blank | `MyClass.cls` | Waive ALL rules for MyClass.cls | `GLOBAL COMPONENT WAIVER` |
+| **Global Rule** | `ApexDoc` | `*` or blank | Waive ApexDoc for ALL files | `GLOBAL RULE WAIVER` |
+| **Global All** | `*` or blank | `*` or blank | Waive ALL rules for ALL files ⚠️ | `GLOBAL ALL WAIVER` |
+
+### Component-Level Global Waivers
+
+Set `rule` to blank or `*` to waive **all violations** for a specific class or LWC until the expiry date:
+
+```csv
+# Waive all rules for a single Apex class
+*,MyLegacyClass.cls,,3,30-06-2026,Legacy class full rewrite in PROJ-999. Too many violations to waive individually.,devlead,17-04-2026,PROJ-999,ACTIVE
+
+# Waive all rules for an LWC (matches any file containing 'myComponent')
+*,myComponent,,3,30-06-2026,LWC pending ESLint refactor tracked in PROJ-888.,devlead,17-04-2026,PROJ-888,ACTIVE
+```
+
+### Rule-Level Global Waivers
+
+Set `file_pattern` to blank or `*` to waive **a specific rule across all files** until the expiry date:
+
+```csv
+# Waive ApexDoc rule for ALL Apex classes (e.g. ApexDoc enforcement deferred for a sprint)
+ApexDoc,*,,3,30-06-2026,ApexDoc compliance deferred while team adopts new template. Tracked in PROJ-777.,devlead,17-04-2026,PROJ-777,ACTIVE
+
+# Waive IfStmtsMustUseBraces across the whole codebase temporarily
+IfStmtsMustUseBraces,*,,3,30-06-2026,Bulk reformatting scheduled in next sprint. Tracked in PROJ-776.,devlead,17-04-2026,PROJ-776,ACTIVE
+```
+
+**How it works:**
+- The pipeline matches using `file_pattern` as before
+- When `rule` is blank or `*`, the rule check is bypassed — **any violation in that file is waived**
+- When `file_pattern` is blank or `*`, the file check is bypassed — **this rule is waived for any file**
+- The pipeline logs a distinct label per type so it's visible in the output
+- Same expiry enforcement applies — expired global waivers still **fail** the pipeline in `enforce` mode
+
+**When to use each type:**
+| Use Case | Approach |
+|----------|----------|
+| Single rule violation in one class | Specific waiver (`ApexDoc,MyClass.cls`) |
+| Multiple violations in a class being rewritten | Global Component (`*,MyClass.cls`) |
+| One rule failing across many classes (e.g. adopting new standard) | Global Rule (`ApexDoc,*`) |
+| LWC with many ESLint findings | Global Component (`*,myLWC`) |
+| New legacy codebase onboarding | Set `SCA_ENFORCEMENT_MODE=off` temporarily, then add targeted waivers |
+
+> ⚠️ Global Rule and Global All waivers are very broad — require Tech Lead **and** Security approval. Max 30-day duration.
 
 ---
 

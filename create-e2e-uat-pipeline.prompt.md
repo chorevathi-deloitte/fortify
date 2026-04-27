@@ -32,9 +32,10 @@ Create a workflow named `UAT End-to-End Pipeline` with the following characteris
 
 **Job 2 — `salesforce-validation`**: Salesforce PR Validation
 - Triggers: `pull_request` only
+- **`needs: [setup]`** — must always depend on `setup` so it appears in the connected dependency graph
 - **Outputs:** `has_delta` (bool) — set `true` if `package/package.xml` or `destructiveChanges/destructiveChanges.xml` contains members
 - Steps:
-  1. checkout (fetch-depth: 0) → setup-node 20 → npm install → install Salesforce CLI
+  1. checkout (fetch-depth: 0) → setup-node 20 → **bootstrap `package.json` if missing** (writes full standard Salesforce `package.json` via bash heredoc — use EXACT versions below and EXACT indentation pattern from rule 14) → npm install → install Salesforce CLI
   2. Authenticate org from `secrets.CRT_UAT_AUTHURL`
   3. Extract test classes from PR body + comments (pattern: `Tests: Class1, Class2`)
   4. Install `sfdx-git-delta` → build delta package → upload delta artifact
@@ -60,31 +61,95 @@ Create a workflow named `UAT End-to-End Pipeline` with the following characteris
 - **Key:** All SCA steps are gated on `vars.SCA_ENFORCEMENT_MODE != 'off'`. In `warn` mode, nothing fails.
 
 **Job 3 — `sca-sast-stage`**: SCA/SAST Stage (npm audit)
-- `needs: [salesforce-validation]`
-- **Condition:** `needs.salesforce-validation.outputs.has_delta == 'true'`
-- Runs `npm audit --json`, checks against `.github/sca-waivers.json`, fails on unwaived/expired violations
+- `needs: [setup]` (runs in **parallel** with Jobs 2, 5, 6)
+- **Condition:** `pull_request` or `workflow_dispatch`
+- **package.json bootstrap:** same guard as Job 2 — if no `package.json` exists a standard one is created before `npm install` so `npm audit` does not ENOENT
+- **npm waiver check — MUST be implemented entirely in bash + `jq`. NEVER use Python scripts, Python heredocs, or `cat > file.py << 'PYTHON_SCRIPT'` for this step.** Copy the following verbatim — do NOT invent a new approach:
+
+```yaml
+      - name: Run dependency SCA gate with waiver support
+        run: |
+          set -euo pipefail
+          WAIVER_FILE=".github/sca-waivers.json"
+          TODAY=$(date -u +%Y-%m-%d)
+          npm audit --json --audit-level=high > audit-output.json 2>/dev/null || true
+          VULN_COUNT=$(jq '[.vulnerabilities // {} | to_entries[] | .value
+            | select(.severity == "high" or .severity == "critical")] | length' audit-output.json 2>/dev/null || echo 0)
+          if [[ "$VULN_COUNT" -eq 0 ]]; then
+            echo "✅ No high/critical vulnerabilities found."
+            exit 0
+          fi
+          echo "Found $VULN_COUNT high/critical vulnerability/ies. Checking waivers..."
+          WAIVERS="[]"
+          if [[ -f "$WAIVER_FILE" ]]; then
+            WAIVERS=$(jq '.' "$WAIVER_FILE" 2>/dev/null || echo "[]")
+            echo "Loaded waiver file: $WAIVER_FILE"
+          else
+            echo "No waiver file found at $WAIVER_FILE — all violations will be evaluated."
+          fi
+          FAIL=0; WAIVED=0; EXPIRED=0
+          while IFS= read -r vuln_json; do
+            PKG=$(echo "$vuln_json"  | jq -r '.name')
+            SEV=$(echo "$vuln_json"  | jq -r '.severity')
+            GHSA=$(echo "$vuln_json" | jq -r '.via[0].source // .via[0] // "unknown"' 2>/dev/null | head -1)
+            WAIVER=$(echo "$WAIVERS" | jq --arg pkg "$PKG" --arg today "$TODAY" \
+              '[.[] | select(.package == $pkg and .expires >= $today)] | first // empty')
+            EXPIRED_WAIVER=$(echo "$WAIVERS" | jq --arg pkg "$PKG" --arg today "$TODAY" \
+              '[.[] | select(.package == $pkg and .expires < $today)] | first // empty')
+            if [[ -n "$WAIVER" && "$WAIVER" != "null" ]]; then
+              EXPIRES=$(echo "$WAIVER" | jq -r '.expires')
+              REASON=$(echo "$WAIVER"  | jq -r '.reason')
+              APPROVED=$(echo "$WAIVER"| jq -r '.approved_by // "unknown"')
+              echo "⏳ WAIVED [$SEV] $PKG (advisory: $GHSA)"
+              echo "   Reason: $REASON | Approved by: $APPROVED | Expires: $EXPIRES"
+              WAIVED=$((WAIVED + 1))
+            elif [[ -n "$EXPIRED_WAIVER" && "$EXPIRED_WAIVER" != "null" ]]; then
+              EXPIRES=$(echo "$EXPIRED_WAIVER" | jq -r '.expires')
+              REASON=$(echo "$EXPIRED_WAIVER"  | jq -r '.reason')
+              echo "::error::❌ EXPIRED WAIVER [$SEV] $PKG (advisory: $GHSA)"
+              echo "   Waiver expired on $EXPIRES — fix is now required. Reason was: $REASON"
+              EXPIRED=$((EXPIRED + 1))
+              FAIL=1
+            else
+              echo "::error::❌ UNWAIVED [$SEV] $PKG (advisory: $GHSA) — no active waiver found."
+              FAIL=$((FAIL + 1))
+            fi
+          done < <(jq -c '[.vulnerabilities // {} | to_entries[] | .value
+            | select(.severity == "high" or .severity == "critical")][]' audit-output.json 2>/dev/null)
+          echo ""
+          echo "──────────────────────────────────────────"
+          echo "SCA Summary: $VULN_COUNT violation(s) found"
+          echo "  ✅ Waived (active):   $WAIVED"
+          echo "  ❌ Expired waivers:   $EXPIRED"
+          echo "  ❌ Unwaived failures: $((FAIL - EXPIRED))"
+          echo "──────────────────────────────────────────"
+          if [[ "$FAIL" -gt 0 ]]; then
+            echo "To suppress a known violation, add an entry to $WAIVER_FILE:"
+            echo '  { "package": "<pkg>", "severity": "<high|critical>", "reason": "<justification>", "expires": "YYYY-MM-DD", "approved_by": "<team>" }'
+            exit 1
+          fi
+          echo "✅ All violations are covered by active waivers."
+```
+
+- **Critical:** bash `if`/`while`/`for` blocks must always be written as bash — NEVER embed them inside a `<< 'HEREDOC'` block for another language
 
 **Job 4 — `automated-governance`**: Automated Hard Gates
+- `needs: [salesforce-validation]` — also implicitly connected to `setup` via `salesforce-validation`
 - `needs: [salesforce-validation]`
 - **Condition:** `needs.salesforce-validation.outputs.has_delta == 'true'`
-- Full Apex test suite with coverage (75% minimum), destructive changes check + PR comment, targeted SCA
+- Full Apex test suite with coverage (`$COVERAGE_THRESHOLD` minimum, default 85%), destructive changes check + PR comment, targeted SCA
 
 **Job 5 — `checkmarx-sast`**: CheckMarx AST Scan
-- `needs: [setup, sca-sast-stage]`, conditional on `run-checkmarx == 'true'`
+- `needs: [setup]` (runs in **parallel** with Jobs 2, 3, 6), conditional on `run-checkmarx == 'true'`
 
 **Job 6 — `fortify-sast-dast`**: Fortify SAST + optional DAST
-- `needs: [setup, sca-sast-stage]`, conditional on `run-fortify == 'true'`
+- `needs: [setup]` (runs in **parallel** with Jobs 2, 3, 5), conditional on `run-fortify == 'true'`
 
-**Job 7 — `manual-validation`**: Manual ReleaseGate Approval
-- `needs: [automated-governance, sca-sast-stage]`
-- **Condition:** `needs.salesforce-validation.outputs.has_delta == 'true'`
-- Uses GitHub environment `ReleaseGate` with required reviewers
-
-**Job 8 — `approval-merge-gate`**: Approval + Merge Gate
+**Job 7 — `approval-merge-gate`**: Approval + Merge Gate
 - Triggers on `pull_request_review` (state=approved)
 - Verifies approval freshness, merges PR, outputs `merge_commit_sha`
 
-**Job 9 — `deploy-after-merge`**: Deploy to UAT
+**Job 8 — `deploy-after-merge`**: Deploy to UAT
 - `needs: [approval-merge-gate]`, `permissions: contents: write`
 - Steps:
   1. Build delta package: `id: delta_pkg` — uses `git rev-parse HEAD^1` (merge parent = UAT branch tip before PR merged) as FROM for `sfdx-git-delta`. Exports `merge_base` output. Falls back to `DELTA_FROM_COMMIT` only if `HEAD^1` is unavailable (shallow clone).
@@ -94,7 +159,7 @@ Create a workflow named `UAT End-to-End Pipeline` with the following characteris
   5. Commit package folder to `pr_packages` orphan branch
   6. Update `DELTA_FROM_COMMIT` via GitHub API (saved for rollback reference + fallback): `curl -L -X PATCH -H "Authorization: Bearer ${GH_PAT}" -H "X-GitHub-Api-Version: 2022-11-28" https://api.github.com/repos/{repo}/actions/variables/DELTA_FROM_COMMIT -d '{"name":"DELTA_FROM_COMMIT","value":"<sha>"}'`
 
-**Job 10 — `trigger-crt-tests`**: CRT Smoke Tests
+**Job 9 — `trigger-crt-tests`**: CRT Smoke Tests
 - `needs: [deploy-after-merge]`
 - GraphQL API: `POST https://graphql.eu-robotic.copado.com/v1` with `X-Authorization: ${CRT_API_TOKEN}`
 - Mutation: `createBuild(projectId: <id>, jobId: <id>)` — triggers the build
@@ -117,11 +182,60 @@ Create a workflow named `UAT End-to-End Pipeline` with the following characteris
   ```
 - Posts result PR comment + GitHub Step Summary (with final CRT status icon + Build ID) with CRT dashboard link
 
-**Job 11 — `rollback`**: Rollback Deployment
+**Job 10 — `rollback`**: Rollback Deployment
 - Triggers on `workflow_dispatch` with `action=rollback`
 - Input: `rollback_commit_sha` — the SHA to revert TO
 - Uses `sfdx-git-delta` in reverse: new metadata treated as destructive
 - Uses `--pre-destructive-changes` to delete new components before re-deploying prior state
+
+---
+
+## Canonical `package.json` devDependencies (MUST use these EXACT versions)
+
+When bootstrapping `package.json` (in any job that creates it if missing), use these exact version specifiers. **Do NOT guess or invent versions — only use what is listed here:**
+
+```json
+{
+  "name": "salesforce-app",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Salesforce App",
+  "scripts": {
+    "lint": "eslint **/{aura,lwc}/**/*.js",
+    "test": "npm run test:unit",
+    "test:unit": "sfdx-lwc-jest",
+    "test:unit:watch": "sfdx-lwc-jest --watch",
+    "test:unit:debug": "sfdx-lwc-jest --debug",
+    "test:unit:coverage": "sfdx-lwc-jest --coverage",
+    "prettier": "prettier --write \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
+    "prettier:verify": "prettier --check \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
+    "prepare": "husky || true",
+    "precommit": "lint-staged"
+  },
+  "devDependencies": {
+    "@lwc/eslint-plugin-lwc": "^3.1.0",
+    "@prettier/plugin-xml": "^3.4.1",
+    "@salesforce/eslint-config-lwc": "^4.0.0",
+    "@salesforce/eslint-plugin-aura": "^3.0.0",
+    "@salesforce/eslint-plugin-lightning": "^2.0.0",
+    "@salesforce/sfdx-lwc-jest": "^7.0.2",
+    "eslint": "^9.29.0",
+    "eslint-plugin-import": "^2.31.0",
+    "eslint-plugin-jest": "^28.14.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.1.2",
+    "prettier": "^3.5.3",
+    "prettier-plugin-apex": "^2.2.6"
+  },
+  "lint-staged": {
+    "**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}": ["prettier --write"],
+    "**/{aura,lwc}/**/*.js": ["eslint"],
+    "**/lwc/**": ["sfdx-lwc-jest -- --bail --findRelatedTests --passWithNoTests"]
+  }
+}
+```
+
+> ⚠️ `@salesforce/eslint-plugin-aura` is at `^3.0.0` — do NOT use `^2.4.0` or any older version (it does not exist on npm and will cause `ETARGET` errors).
 
 ---
 
@@ -132,12 +246,16 @@ CSV file on **main branch only**. The pipeline always fetches from main via GitH
 ```
 rule,file_pattern,message_contains,severity_threshold,expiry,reason,approved_by,approved_date,ticket,status
 ApexDoc,MyClass.cls,,3,10-05-2026,Reason here. Tracked in PROJ-123.,jane-techlead,10-04-2026,PROJ-123,ACTIVE
+*,MyLegacyClass.cls,,3,10-05-2026,Global component waiver — rewrite in progress. Tracked in PROJ-999.,jane-techlead,10-04-2026,PROJ-999,ACTIVE
+ApexDoc,*,,3,10-05-2026,Global rule waiver — ApexDoc deferred for sprint. Tracked in PROJ-998.,jane-techlead,10-04-2026,PROJ-998,ACTIVE
+*,myLWCComponent,,3,10-05-2026,Global LWC component waiver — ESLint refactor in progress. Tracked in PROJ-997.,jane-techlead,10-04-2026,PROJ-997,ACTIVE
+no-unused-vars,/lwc/,,3,10-05-2026,Global rule for all LWC files. Tracked in PROJ-996.,jane-techlead,10-04-2026,PROJ-996,ACTIVE
 ```
 
 | Column | Required | Description |
 |--------|----------|-------------|
-| `rule` | ✅ | Rule name substring match |
-| `file_pattern` | ✅ | Filename substring match |
+| `rule` | ✅ | Rule name substring match. **Blank or `*` = global component waiver (waives ALL rules for that file/LWC).** |
+| `file_pattern` | ✅ | Filename substring match (e.g. `MyClass.cls`, `myLWC`, `/lwc/`). **Blank or `*` = global rule waiver (waives this rule for ALL files).** |
 | `message_contains` | ⬜ | Optional substring of violation message to narrow match |
 | `severity_threshold` | ⬜ | Only waive at this severity or above (blank = any) |
 | `expiry` | ✅ | DD-MM-YYYY preferred; also accepts DD/MM/YYYY and YYYY-MM-DD |
@@ -148,6 +266,15 @@ ApexDoc,MyClass.cls,,3,10-05-2026,Reason here. Tracked in PROJ-123.,jane-techlea
 | `status` | ✅ | `ACTIVE` or `REVOKED` (keep revoked rows for audit trail — never delete) |
 
 Comment rows starting with `#` are ignored.
+
+**Waiver types (determined by `rule` and `file_pattern` wildcards):**
+
+| Type | `rule` | `file_pattern` | Effect | Log Label |
+|------|--------|----------------|--------|-----------|
+| Specific | `ApexDoc` | `MyClass.cls` | Waive ApexDoc for MyClass.cls only | `WAIVED` |
+| Global Component | `*` or blank | `MyClass.cls` | Waive ALL rules for MyClass.cls | `GLOBAL COMPONENT WAIVER` |
+| Global Rule | `ApexDoc` | `*` or blank | Waive ApexDoc for ALL files | `GLOBAL RULE WAIVER` |
+| Global All | `*` or blank | `*` or blank | Waive ALL rules for ALL files ⚠️ | `GLOBAL ALL WAIVER` |
 Status values: `WAIVED` (active, >30d), `WAIVED_EXPIRING_SOON` (≤30d), `VIOLATION` (no waiver), `EXPIRED_WAIVER` (past expiry — fails pipeline in enforce mode).
 Results written to `sca-governance-report.csv` (includes Days_Left, Approved_Date columns).
 
@@ -190,7 +317,6 @@ JSON array for npm audit waivers:
 ### `docs/pipeline-setup.md`
 - All required secrets (with descriptions + how to create GH_PAT)
 - All required variables (with defaults)
-- GitHub environment `ReleaseGate` setup
 - Branch protection rules
 - `pr_packages` branch description
 - DELTA_FROM_COMMIT auto-update explanation
@@ -202,7 +328,7 @@ JSON array for npm audit waivers:
 - Part 2: npm SCA waivers (schema, governance)
 
 ### `docs/manual_runbook.md`
-- Manual trigger guide, ReleaseGate approval steps
+- PR review and deployment approver guide — PR review approval is the single human gate before deployment (no ReleaseGate)
 - Rollback procedure: find SHA, trigger workflow_dispatch with action=rollback
 - What rollback does (new metadata → destructive, modified → re-deployed, deleted → restored)
 
@@ -220,3 +346,67 @@ JSON array for npm audit waivers:
 6. Never combine `--async` and `--wait` on the same deploy command
 7. Summarize what was created/updated and any required configuration
 8. `SCA_ENFORCEMENT_MODE` must be documented in every relevant doc file. Set it to `off` to bypass all SCA steps during initial project phase, `warn` for informational-only, `enforce` (default) to fail on expired waivers.
+
+## Critical Code-Generation Rules (MUST follow — these prevent runtime errors)
+
+9. **Never use Python scripts for waiver checking.** All waiver logic (npm audit, SCA) must be pure bash + `jq`. Do NOT generate `cat > *.py << 'PYTHON_SCRIPT'` blocks for this purpose.
+10. **Never embed bash control flow inside a heredoc.** When writing a file via `cat > file << 'HEREDOC'`, the content between the markers must be valid for that language only. Bash `if [ ... ]`, `while`, `for` etc. must be OUTSIDE any heredoc, not inside it. Example of the correct pattern:
+    ```bash
+    # CORRECT — bash guard wraps the heredoc
+    if [[ ! -f .github/sca-waivers.json ]]; then
+      echo "No waiver file found"
+    fi
+    # WRONG — bash guard inside a Python heredoc (causes SyntaxError)
+    cat > check.py << 'PYTHON_SCRIPT'
+    if [ -f .github/sca-waivers.json ]; then   # ← NEVER do this
+    PYTHON_SCRIPT
+    ```
+11. **Always use `set -euo pipefail`** at the top of multi-line `run:` blocks.
+12. **The npm audit waiver check step MUST be copied verbatim from the canonical implementation in Job 3 above** — do NOT invent a new approach, do NOT use Python, do NOT use a heredoc-based script. If uncertain, read `.github/workflows/e2e-uat-pipeline.yml` lines 1283–1367 from this reference repo and copy that implementation exactly.
+13. **If the generated workflow produces a `check-npm-waivers.py` file or any `cat > *.py << 'PYTHON_SCRIPT'` block for waiver checking, the generation is WRONG.** Delete the Python file/step and replace it with the pure-bash YAML block shown in Job 3 above.
+14. **⛔ YAML heredoc indentation — CRITICAL for `package.json` bootstrap steps.** In GitHub Actions, the entire `run: |` block is a YAML literal string. The YAML parser reads it BEFORE bash sees it. If ANY line of the heredoc body starts at column 1 (unindented), the YAML parser treats `{` as a YAML flow mapping and raises `Invalid workflow file`. The closing heredoc marker must also be indented at the same level as the body — NOT at column 0 (as you would in normal bash).
+
+    **WRONG** — `{` at column 1 causes YAML parse error:
+    ```yaml
+          - name: Install npm dependencies
+            run: |
+              if [[ ! -f package.json ]]; then
+                cat > package.json << 'EOF'
+    {
+      "name": "salesforce-app"
+    }
+    EOF
+              fi
+    ```
+
+    **CORRECT** — use `PKGJSON` delimiter; JSON body indented 10 spaces (matching the `run:` block indentation):
+    ```yaml
+          - name: Install npm dependencies
+            run: |
+              set -euo pipefail
+              if [[ ! -f package.json ]]; then
+                cat > package.json << 'PKGJSON'
+              {
+                "name": "salesforce-app",
+                "private": true,
+                ...
+              }
+              PKGJSON
+              fi
+    ```
+    GitHub Actions strips the common leading whitespace from the `run:` block before passing it to bash, so `PKGJSON` at 10-space indent is correctly treated as the heredoc end marker by bash.
+
+    **Rules:**
+    - Always use `PKGJSON` as the heredoc delimiter (never `EOF` or `JSON`)
+    - The opening `{` must be indented at the same level as the surrounding bash (10 spaces in a typical step)
+    - The closing `PKGJSON` must be at the SAME indentation as the `{` line
+    - Read `.github/workflows/e2e-uat-pipeline.yml` lines 224–280 and copy the exact indentation pattern
+
+15. **⛔ Job `needs:` chain is mandatory — all PR jobs must be connected to `setup`.** The correct `needs:` for every job that runs on `pull_request`:
+    - Job 2 `salesforce-validation`: `needs: [setup]`
+    - Job 3 `sca-sast-stage`: `needs: [setup]`
+    - Job 4 `automated-governance`: `needs: [salesforce-validation]`
+    - Job 5 `checkmarx-sast`: `needs: [setup]`
+    - Job 6 `fortify-sast-dast`: `needs: [setup]`
+
+    If `salesforce-validation` does NOT have `needs: [setup]`, it runs as an orphan parallel to `setup` rather than after it, and the jobs appear disconnected in the GitHub Actions UI. This is always wrong.

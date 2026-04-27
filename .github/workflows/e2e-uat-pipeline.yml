@@ -26,6 +26,7 @@ on:
   pull_request:
     branches:
       - uat
+      - main
     types:
       - opened
       - reopened
@@ -224,6 +225,55 @@ jobs:
       - name: Install npm dependencies
         run: |
           set -euo pipefail
+          if [[ ! -f package.json ]]; then
+            echo "ℹ️  No package.json found — creating standard Salesforce package.json."
+            cat > package.json << 'PKGJSON'
+          {
+            "name": "salesforce-app",
+            "private": true,
+            "version": "1.0.0",
+            "description": "Salesforce App",
+            "scripts": {
+              "lint": "eslint **/{aura,lwc}/**/*.js",
+              "test": "npm run test:unit",
+              "test:unit": "sfdx-lwc-jest",
+              "test:unit:watch": "sfdx-lwc-jest --watch",
+              "test:unit:debug": "sfdx-lwc-jest --debug",
+              "test:unit:coverage": "sfdx-lwc-jest --coverage",
+              "prettier": "prettier --write \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
+              "prettier:verify": "prettier --check \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
+              "prepare": "husky || true",
+              "precommit": "lint-staged"
+            },
+            "devDependencies": {
+              "@lwc/eslint-plugin-lwc": "^3.1.0",
+              "@prettier/plugin-xml": "^3.4.1",
+              "@salesforce/eslint-config-lwc": "^4.0.0",
+              "@salesforce/eslint-plugin-aura": "^3.0.0",
+              "@salesforce/eslint-plugin-lightning": "^2.0.0",
+              "@salesforce/sfdx-lwc-jest": "^7.0.2",
+              "eslint": "^9.29.0",
+              "eslint-plugin-import": "^2.31.0",
+              "eslint-plugin-jest": "^28.14.0",
+              "husky": "^9.1.7",
+              "lint-staged": "^16.1.2",
+              "prettier": "^3.5.3",
+              "prettier-plugin-apex": "^2.2.6"
+            },
+            "lint-staged": {
+              "**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}": [
+                "prettier --write"
+              ],
+              "**/{aura,lwc}/**/*.js": [
+                "eslint"
+              ],
+              "**/lwc/**": [
+                "sfdx-lwc-jest -- --bail --findRelatedTests --passWithNoTests"
+              ]
+            }
+          }
+          PKGJSON
+          fi
           if [[ -f package-lock.json ]]; then
             npm ci
           else
@@ -944,16 +994,34 @@ jobs:
 
                   print(f"  Checking violation: rule='{rule}' file='{os.path.basename(file_path)}'")
 
-                  # Match against waivers: rule substring + file_pattern substring + optional message
+                  # Match against waivers.
+                  # Matching logic:
+                  #   rule:         blank or '*' = match ANY rule (component-level global waiver)
+                  #                 otherwise = substring match (e.g. 'ApexDoc' matches 'ApexDoc')
+                  #   file_pattern: substring match against file path (e.g. 'MyClass.cls')
+                  #   message_contains: optional substring of violation message to narrow match
                   matched = None
                   for w in waivers:
                       w_rule = w.get("rule", "").strip()
                       w_file = w.get("file_pattern", "").strip()
                       w_msg  = w.get("message_contains", "").strip()
-                      rule_match = w_rule and w_rule in rule
-                      file_match = w_file and w_file in file_path
+                      # blank/`*` rule  = global component waiver (any rule for this file)
+                      # blank/`*` file  = global rule waiver (this rule for any file)
+                      # blank/`*` both  = waive everything (use with extreme caution)
+                      rule_match = (not w_rule or w_rule == "*") or (w_rule in rule)
+                      file_match = (not w_file or w_file == "*") or (w_file in file_path)
                       msg_match  = (not w_msg) or (w_msg.lower() in problem.lower())
-                      print(f"    vs waiver rule='{w_rule}' file_pattern='{w_file}' → rule_match={rule_match} file_match={file_match} msg_match={msg_match}")
+                      is_global_rule = (not w_rule or w_rule == "*")
+                      is_global_file = (not w_file or w_file == "*")
+                      if is_global_rule and is_global_file:
+                          waiver_type = "GLOBAL ALL"
+                      elif is_global_rule:
+                          waiver_type = "GLOBAL COMPONENT"
+                      elif is_global_file:
+                          waiver_type = "GLOBAL RULE"
+                      else:
+                          waiver_type = "SPECIFIC"
+                      print(f"    vs waiver [{waiver_type}] rule='{w_rule}' file_pattern='{w_file}' → rule_match={rule_match} file_match={file_match} msg_match={msg_match}")
                       if rule_match and file_match and msg_match:
                           matched = w
                           break
@@ -963,14 +1031,26 @@ jobs:
                       days_left = (expiry - TODAY).days
 
                       if TODAY <= expiry:
+                          m_rule = matched.get("rule","").strip()
+                          m_file = matched.get("file_pattern","").strip()
+                          is_global_rule = not m_rule or m_rule == "*"
+                          is_global_file = not m_file or m_file == "*"
+                          if is_global_rule and is_global_file:
+                              waiver_label = "GLOBAL ALL WAIVER"
+                          elif is_global_rule:
+                              waiver_label = "GLOBAL COMPONENT WAIVER"
+                          elif is_global_file:
+                              waiver_label = "GLOBAL RULE WAIVER"
+                          else:
+                              waiver_label = "WAIVED"
                           if days_left <= WARN_DAYS:
                               status = "WAIVED_EXPIRING_SOON"
                               near_expiry += 1
-                              print(f"::warning::⏰ WAIVER EXPIRING IN {days_left}d: [{rule}] {os.path.basename(file_path)}:{line} — expires {matched['expiry']} (ticket: {matched.get('ticket','n/a')})")
+                              print(f"::warning::⏰ {waiver_label} EXPIRING IN {days_left}d: [{rule}] {os.path.basename(file_path)}:{line} — expires {matched['expiry']} (ticket: {matched.get('ticket','n/a')})")
                           else:
                               status = "WAIVED"
                               waived_count += 1
-                              print(f"✅ WAIVED: [{rule}] {os.path.basename(file_path)}:{line} — expires {matched['expiry']} | approved_by: {matched.get('approved_by','n/a')} | ticket: {matched.get('ticket','n/a')}")
+                              print(f"✅ {waiver_label}: [{rule}] {os.path.basename(file_path)}:{line} — expires {matched['expiry']} | approved_by: {matched.get('approved_by','n/a')} | ticket: {matched.get('ticket','n/a')}")
                       else:
                           status = "EXPIRED_WAIVER"
                           expired_count += 1
@@ -1146,6 +1226,55 @@ jobs:
       - name: Install dependencies
         run: |
           set -euo pipefail
+          if [[ ! -f package.json ]]; then
+            echo "ℹ️  No package.json found — creating standard Salesforce package.json."
+            cat > package.json << 'PKGJSON'
+          {
+            "name": "salesforce-app",
+            "private": true,
+            "version": "1.0.0",
+            "description": "Salesforce App",
+            "scripts": {
+              "lint": "eslint **/{aura,lwc}/**/*.js",
+              "test": "npm run test:unit",
+              "test:unit": "sfdx-lwc-jest",
+              "test:unit:watch": "sfdx-lwc-jest --watch",
+              "test:unit:debug": "sfdx-lwc-jest --debug",
+              "test:unit:coverage": "sfdx-lwc-jest --coverage",
+              "prettier": "prettier --write \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
+              "prettier:verify": "prettier --check \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
+              "prepare": "husky || true",
+              "precommit": "lint-staged"
+            },
+            "devDependencies": {
+              "@lwc/eslint-plugin-lwc": "^3.1.0",
+              "@prettier/plugin-xml": "^3.4.1",
+              "@salesforce/eslint-config-lwc": "^4.0.0",
+              "@salesforce/eslint-plugin-aura": "^3.0.0",
+              "@salesforce/eslint-plugin-lightning": "^2.0.0",
+              "@salesforce/sfdx-lwc-jest": "^7.0.2",
+              "eslint": "^9.29.0",
+              "eslint-plugin-import": "^2.31.0",
+              "eslint-plugin-jest": "^28.14.0",
+              "husky": "^9.1.7",
+              "lint-staged": "^16.1.2",
+              "prettier": "^3.5.3",
+              "prettier-plugin-apex": "^2.2.6"
+            },
+            "lint-staged": {
+              "**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}": [
+                "prettier --write"
+              ],
+              "**/{aura,lwc}/**/*.js": [
+                "eslint"
+              ],
+              "**/lwc/**": [
+                "sfdx-lwc-jest -- --bail --findRelatedTests --passWithNoTests"
+              ]
+            }
+          }
+          PKGJSON
+          fi
           if [[ -f package-lock.json ]]; then
             npm ci
           else
@@ -1689,6 +1818,55 @@ jobs:
       - name: Install npm dependencies
         run: |
           set -euo pipefail
+          if [[ ! -f package.json ]]; then
+            echo "ℹ️  No package.json found — creating standard Salesforce package.json."
+            cat > package.json << 'PKGJSON'
+          {
+            "name": "salesforce-app",
+            "private": true,
+            "version": "1.0.0",
+            "description": "Salesforce App",
+            "scripts": {
+              "lint": "eslint **/{aura,lwc}/**/*.js",
+              "test": "npm run test:unit",
+              "test:unit": "sfdx-lwc-jest",
+              "test:unit:watch": "sfdx-lwc-jest --watch",
+              "test:unit:debug": "sfdx-lwc-jest --debug",
+              "test:unit:coverage": "sfdx-lwc-jest --coverage",
+              "prettier": "prettier --write \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
+              "prettier:verify": "prettier --check \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
+              "prepare": "husky || true",
+              "precommit": "lint-staged"
+            },
+            "devDependencies": {
+              "@lwc/eslint-plugin-lwc": "^3.1.0",
+              "@prettier/plugin-xml": "^3.4.1",
+              "@salesforce/eslint-config-lwc": "^4.0.0",
+              "@salesforce/eslint-plugin-aura": "^3.0.0",
+              "@salesforce/eslint-plugin-lightning": "^2.0.0",
+              "@salesforce/sfdx-lwc-jest": "^7.0.2",
+              "eslint": "^9.29.0",
+              "eslint-plugin-import": "^2.31.0",
+              "eslint-plugin-jest": "^28.14.0",
+              "husky": "^9.1.7",
+              "lint-staged": "^16.1.2",
+              "prettier": "^3.5.3",
+              "prettier-plugin-apex": "^2.2.6"
+            },
+            "lint-staged": {
+              "**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}": [
+                "prettier --write"
+              ],
+              "**/{aura,lwc}/**/*.js": [
+                "eslint"
+              ],
+              "**/lwc/**": [
+                "sfdx-lwc-jest -- --bail --findRelatedTests --passWithNoTests"
+              ]
+            }
+          }
+          PKGJSON
+          fi
           if [[ -f package-lock.json ]]; then
             npm ci
           else
@@ -2437,6 +2615,55 @@ jobs:
       - name: Install npm dependencies
         run: |
           set -euo pipefail
+          if [[ ! -f package.json ]]; then
+            echo "ℹ️  No package.json found — creating standard Salesforce package.json."
+            cat > package.json << 'PKGJSON'
+          {
+            "name": "salesforce-app",
+            "private": true,
+            "version": "1.0.0",
+            "description": "Salesforce App",
+            "scripts": {
+              "lint": "eslint **/{aura,lwc}/**/*.js",
+              "test": "npm run test:unit",
+              "test:unit": "sfdx-lwc-jest",
+              "test:unit:watch": "sfdx-lwc-jest --watch",
+              "test:unit:debug": "sfdx-lwc-jest --debug",
+              "test:unit:coverage": "sfdx-lwc-jest --coverage",
+              "prettier": "prettier --write \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
+              "prettier:verify": "prettier --check \"**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}\"",
+              "prepare": "husky || true",
+              "precommit": "lint-staged"
+            },
+            "devDependencies": {
+              "@lwc/eslint-plugin-lwc": "^3.1.0",
+              "@prettier/plugin-xml": "^3.4.1",
+              "@salesforce/eslint-config-lwc": "^4.0.0",
+              "@salesforce/eslint-plugin-aura": "^3.0.0",
+              "@salesforce/eslint-plugin-lightning": "^2.0.0",
+              "@salesforce/sfdx-lwc-jest": "^7.0.2",
+              "eslint": "^9.29.0",
+              "eslint-plugin-import": "^2.31.0",
+              "eslint-plugin-jest": "^28.14.0",
+              "husky": "^9.1.7",
+              "lint-staged": "^16.1.2",
+              "prettier": "^3.5.3",
+              "prettier-plugin-apex": "^2.2.6"
+            },
+            "lint-staged": {
+              "**/*.{cls,cmp,component,css,html,js,json,md,page,trigger,xml,yaml,yml}": [
+                "prettier --write"
+              ],
+              "**/{aura,lwc}/**/*.js": [
+                "eslint"
+              ],
+              "**/lwc/**": [
+                "sfdx-lwc-jest -- --bail --findRelatedTests --passWithNoTests"
+              ]
+            }
+          }
+          PKGJSON
+          fi
           if [[ -f package-lock.json ]]; then npm ci; else npm install; fi
 
       - name: Install Salesforce CLI
