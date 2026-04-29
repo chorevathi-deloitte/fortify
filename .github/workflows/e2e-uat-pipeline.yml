@@ -902,13 +902,11 @@ jobs:
 
       - name: Salesforce Code Analyzer
         if: steps.sca-targets.outputs.has_targets == 'true' && vars.SCA_ENFORCEMENT_MODE != 'off'
-        continue-on-error: true
         run: |
           sf scanner run \
             --target "${{ steps.sca-targets.outputs.targets }}" \
             --format "csv" \
-            --outfile "sfdx-report.csv" \
-            --severity-threshold 3
+            --outfile "sfdx-report.csv"
 
       - name: Check scanner results against waivers
         id: waiver-check
@@ -1488,13 +1486,11 @@ jobs:
 
       - name: Salesforce Code Analyzer
         if: steps.sca-targets.outputs.has_targets == 'true'
-        continue-on-error: true
         run: |
           sf scanner run \
             --target "${{ steps.sca-targets.outputs.targets }}" \
             --format "csv" \
-            --outfile "sfdx-report.csv" \
-            --severity-threshold 3
+            --outfile "sfdx-report.csv"
 
       - name: Upload scanner report
         if: always()
