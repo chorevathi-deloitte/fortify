@@ -30,6 +30,11 @@ jobs:
       #     sf org login jwt --username ${{ secrets.SF_USERNAME }} --jwt-key-file ${{ secrets.SF_JWT_KEY }} --set-default
       #     sf project deploy start --source-dir force-app --test-level NoTestRun
 
+      - name: Setup Fortify CLI
+        uses: fortify/github-action/setup@v1
+        with:
+          fcli: bootstrapped
+
       - name: Authenticate Fortify CLI
         run: |
           # This creates a session for the CLI to use in subsequent steps
