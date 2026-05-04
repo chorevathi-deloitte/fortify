@@ -48,6 +48,8 @@ jobs:
           FOD_URL: "https://api.ams.fortify.com"
           FOD_CLIENT_ID: "dba72677-9feb-4e70-be2f-b047f252df00"
           FOD_CLIENT_SECRET: "IyZKRkI4OFFGSFFoQzhsdUdLVyhuTVV5YnRzNkEx0"
+          release-id: "257019"
+          application-id: "252894"
           export-sarif: true
           fod-release-create: true
           # Optional: FOD_RELEASE: MyApp:main
