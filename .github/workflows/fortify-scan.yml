@@ -1,4 +1,4 @@
-name: Fortify Vulnerability Scan
+name: Fortify Vulnerability Scann
 
 on:
   pull_request:
