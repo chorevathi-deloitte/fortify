@@ -1,0 +1,42 @@
+name: Fortify Vulnerability Scan
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  fortify-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write  # Required if you want to comment on PRs
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Add build steps if necessary for your project
+      # For Salesforce projects, you might need to install SFDX CLI or build the project
+      # Example:
+      # - name: Setup Node.js
+      #   uses: actions/setup-node@v4
+      #   with:
+      #     node-version: '18'
+      # - name: Install SFDX CLI
+      #   run: npm install -g @salesforce/cli
+      # - name: Authenticate and prepare project
+      #   run: |
+      #     sf org login jwt --username ${{ secrets.SF_USERNAME }} --jwt-key-file ${{ secrets.SF_JWT_KEY }} --set-default
+      #     sf project deploy start --source-dir force-app --test-level NoTestRun
+
+      - name: Run Fortify Scan
+        uses: fortify/github-action@v3
+        env:
+          # For Fortify on Demand (FoD)
+          context: "my-fod-context"
+          FOD_URL: "https://trial.fortify.com/"
+          FOD_CLIENT_ID: "dba72677-9feb-4e70-be2f-b047f252df00"
+          FOD_CLIENT_SECRET: "IyZKRkI4OFFGSFFoQzhsdUdLVyhuTVV5YnRzNkEx0"
+          export-sarif: true 
+          # Optional: FOD_RELEASE: MyApp:main
