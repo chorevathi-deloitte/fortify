@@ -38,14 +38,14 @@ jobs:
       - name: Authenticate Fortify CLI
         run: |
           # This creates a session for the CLI to use in subsequent steps
-          fcli fod session login --url "https://api.fortify.com" --client-id ${{ secrets.FOD_CLIENT_ID }} --client-secret ${{ secrets.FOD_CLIENT_SECRET }}
+          fcli fod session login --url "https://api.trial.fortify.com" --client-id ${{ secrets.FOD_CLIENT_ID }} --client-secret ${{ secrets.FOD_CLIENT_SECRET }}
 
 
       - name: Run Fortify Scan
         uses: fortify/github-action@v3
         env:
           # For Fortify on Demand (FoD)
-          FOD_URL: "https://api.fortify.com"
+          FOD_URL: "https://api.trial.fortify.com"
           FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
           FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
           release-id: "257019"
