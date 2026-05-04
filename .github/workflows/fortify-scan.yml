@@ -13,43 +13,26 @@ jobs:
       security-events: write
       pull-requests: write  # Required if you want to comment on PRs
     steps:
-      - name: Checkout code
+      - name: Check Out Source Code
         uses: actions/checkout@v4
-
-      # Add build steps if necessary for your project
-      # For Salesforce projects, you might need to install SFDX CLI or build the project
-      # Example:
-      # - name: Setup Node.js
-      #   uses: actions/setup-node@v4
-      #   with:
-      #     node-version: '18'
-      # - name: Install SFDX CLI
-      #   run: npm install -g @salesforce/cli
-      # - name: Authenticate and prepare project
-      #   run: |
-      #     sf org login jwt --username ${{ secrets.SF_USERNAME }} --jwt-key-file ${{ secrets.SF_JWT_KEY }} --set-default
-      #     sf project deploy start --source-dir force-app --test-level NoTestRun
-
-      - name: Setup Fortify CLI
-        uses: fortify/github-action/setup@v1
+    
+      # 1. Setup ScanCentral (to package your code)
+      - name: Setup Fortify ScanCentral
+        uses: fortify/gha-setup-scancentral-client@v2
+    
+      # 2. Package the code into package.zip
+      - name: Package Code
+        run: scancentral package -bt none -o package.zip
+    
+      # 3. Upload DIRECTLY to your existing Release ID
+      - name: Upload to FoD
+        uses: fortify/gha-setup-fod-uploader@v1
         with:
-          fcli: latest
-
-      - name: Authenticate Fortify CLI
-        run: |
-          # This creates a session for the CLI to use in subsequent steps
-          fcli fod session login --url "https://api.trial.fortify.com" --client-id ${{ secrets.FOD_CLIENT_ID }} --client-secret ${{ secrets.FOD_CLIENT_SECRET }}
-
-
-      - name: Run Fortify Scan
-        uses: fortify/github-action@v3
-        env:
-          # For Fortify on Demand (FoD)
-          FOD_URL: "https://api.trial.fortify.com"
-          FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
-          FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
+          fod-url: "https://api.trial.fortify.com"
+          client-id: ${{ secrets.FOD_CLIENT_ID }}
+          client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+          # Use the NUMERIC ID (e.g., 12345) from your portal URL
           release-id: "257019"
-          application-id: "252894"
-          export-sarif: true
-          fod-release-create: false
-          # Optional: FOD_RELEASE: MyApp:main
+          file: package.zip
+          # This ensures the workflow waits for the scan to finish
+          notes: "Scan triggered from GitHub Actions"
