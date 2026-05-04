@@ -51,5 +51,5 @@ jobs:
           release-id: "257019"
           application-id: "252894"
           export-sarif: true
-          fod-release-create: true
+          fod-release-create: false
           # Optional: FOD_RELEASE: MyApp:main
