@@ -45,8 +45,7 @@ jobs:
         uses: fortify/github-action@v3
         env:
           # For Fortify on Demand (FoD)
-          context: "my-fod-context"
-          FOD_URL: "https://trial.fortify.com/"
+          FOD_URL: "https://api.ams.fortify.com"
           FOD_CLIENT_ID: "dba72677-9feb-4e70-be2f-b047f252df00"
           FOD_CLIENT_SECRET: "IyZKRkI4OFFGSFFoQzhsdUdLVyhuTVV5YnRzNkEx0"
           export-sarif: true
