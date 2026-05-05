@@ -18,7 +18,7 @@ jobs:
       FOD_DAST_ASSESSMENT_TYPE: ${{ vars.FOD_DAST_ASSESSMENT_TYPE || 'Dynamic Assessment' }}
       FOD_DAST_FREQUENCY: ${{ vars.FOD_DAST_FREQUENCY || 'SingleScan' }}
       FOD_DAST_ENVIRONMENT: ${{ vars.FOD_DAST_ENVIRONMENT || 'External' }}
-      SOURCE_DIR: force-app  # Define the source directory for scanning
+      SOURCE_DIR: .  # Define the source directory for scanning
       FCLI_BOOTSTRAP_VERSION: latest  # Define the FCLI bootstrap version
     steps:
       - name: Checkout source code
