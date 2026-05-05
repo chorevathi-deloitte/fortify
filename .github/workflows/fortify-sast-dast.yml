@@ -1,4 +1,4 @@
-name: Fortify Vulnerability Scan
+name: Fortify SAST Vulnerability Scan
 
 on:
   pull_request:
@@ -64,7 +64,7 @@ jobs:
       - name: Wait for SAST scan to complete
         run: |
           fcli fod session login --url https://api.trial.fortify.com --client-id ${{ secrets.FOD_CLIENT_ID }} --client-secret ${{ secrets.FOD_CLIENT_SECRET }}
-          fcli fod sast-scan wait --rel "257019" --max-attempts 180 --wait-interval 30
+          fcli fod sast-scan wait-for --rel "257019" --max-attempts 180 --wait-interval 30
 
       - name: Export SARIF
         run: |
