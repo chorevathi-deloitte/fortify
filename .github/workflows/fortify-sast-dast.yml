@@ -1,0 +1,75 @@
+name: Fortify Vulnerability Scan
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  fortify-sast-dast:
+    name: Fortify on Demand Scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      FOD_URL: ${{ vars.FOD_URL }}
+      HAS_DAST_URL: ${{ secrets.FOD_DAST_SCAN_URL != '' }}
+      FOD_DAST_ASSESSMENT_TYPE: ${{ vars.FOD_DAST_ASSESSMENT_TYPE || 'Dynamic Assessment' }}
+      FOD_DAST_FREQUENCY: ${{ vars.FOD_DAST_FREQUENCY || 'SingleScan' }}
+      FOD_DAST_ENVIRONMENT: ${{ vars.FOD_DAST_ENVIRONMENT || 'External' }}
+      SOURCE_DIR: force-app  # Define the source directory for scanning
+      FCLI_BOOTSTRAP_VERSION: latest  # Define the FCLI bootstrap version
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Fortify SAST Scan
+        uses: fortify/github-action@v3
+        env:
+          FOD_URL: ${{ vars.FOD_URL }}
+          FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
+          FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
+          FOD_RELEASE: "257019"
+          SOURCE_DIR: ${{ env.SOURCE_DIR }}
+          DO_SAST_EXPORT: true
+
+      - name: Locate Fortify SAST SARIF report
+        id: find-sast-sarif
+        run: |
+          set -euo pipefail
+          sarif=$(find . -name 'gh-fortify-sast.sarif' -o -name '*.sarif' | head -n 1 || true)
+          if [ -n "$sarif" ]; then
+            echo "SARIF_PATH=$sarif" >> $GITHUB_OUTPUT
+          else
+            echo "SARIF_PATH=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload Fortify SAST SARIF report
+        if: steps.find-sast-sarif.outputs.SARIF_PATH != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortify-sast-sarif-report
+          path: ${{ steps.find-sast-sarif.outputs.SARIF_PATH }}
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Upload Fortify SAST results to GitHub Code Scanning
+        if: steps.find-sast-sarif.outputs.SARIF_PATH != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ steps.find-sast-sarif.outputs.SARIF_PATH }}
+          category: fortify-sast
+
+      - name: Setup Fortify tools for DAST
+        if: env.HAS_DAST_URL == 'true'
+        uses: fortify/github-action/setup@v3
+        with:
+          fcli: bootstrapped
+          fod-uploader: latest
+        env:
+          FCLI_BOOTSTRAP_VERSION: ${{ env.FCLI_BOOTSTRAP_VERSION }}
+
+      
