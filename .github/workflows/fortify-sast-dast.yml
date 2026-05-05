@@ -1,4 +1,4 @@
-name: Fortify SAST Vulnerability Scan
+name: Fortify Vulnerability Scan
 
 on:
   pull_request:
@@ -52,19 +52,13 @@ jobs:
           scancentral package -bt none -o ../package.zip
 
       - name: Upload and start SAST scan
-        uses: fortify/gha-setup-fod-uploader@v1
-        with:
-          fod-url: https://api.trial.fortify.com
-          client-id: ${{ secrets.FOD_CLIENT_ID }}
-          client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
-          release-id: "257019"
-          file: package.zip
-          notes: "SAST scan from GitHub Actions"
+        run: |
+          fcli fod session login --url https://api.trial.fortify.com --client-id ${{ secrets.FOD_CLIENT_ID }} --client-secret ${{ secrets.FOD_CLIENT_SECRET }}
+          fcli fod sast-scan start --rel "257019" --file package.zip --store scan
 
       - name: Wait for SAST scan to complete
         run: |
-          fcli fod session login --url https://api.trial.fortify.com --client-id ${{ secrets.FOD_CLIENT_ID }} --client-secret ${{ secrets.FOD_CLIENT_SECRET }}
-          fcli fod sast-scan wait-for --rel "257019" --max-attempts 180 --wait-interval 30
+          fcli fod sast-scan wait-for ::scan:: --timeout 90m --interval 30s
 
       - name: Export SARIF
         run: |
