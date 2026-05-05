@@ -41,8 +41,8 @@ jobs:
       - name: Setup Fortify tools for SAST
         uses: fortify/github-action/setup@v3
         with:
-          fcli: bootstrapped
-          fod-uploader: latest
+          scancentral: latest
+          fcli: latest
 
       - name: Package code
         run: |
