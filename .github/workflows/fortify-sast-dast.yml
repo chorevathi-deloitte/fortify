@@ -38,10 +38,12 @@ jobs:
             exit 1
           fi
 
-      - name: Setup Fortify tools for SAST
+      - name: Setup Fortify ScanCentral
+        uses: fortify/gha-setup-scancentral-client@v2
+
+      - name: Setup FCLI
         uses: fortify/github-action/setup@v3
         with:
-          scancentral: latest
           fcli: latest
 
       - name: Package code
