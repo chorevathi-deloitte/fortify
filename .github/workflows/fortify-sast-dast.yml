@@ -18,7 +18,7 @@ jobs:
       FOD_DAST_ASSESSMENT_TYPE: ${{ vars.FOD_DAST_ASSESSMENT_TYPE || 'Dynamic Assessment' }}
       FOD_DAST_FREQUENCY: ${{ vars.FOD_DAST_FREQUENCY || 'SingleScan' }}
       FOD_DAST_ENVIRONMENT: ${{ vars.FOD_DAST_ENVIRONMENT || 'External' }}
-      SOURCE_DIR: ./force-app  # Define the source directory for scanning
+      SOURCE_DIR: force-app  # Define the source directory for scanning
       FCLI_BOOTSTRAP_VERSION: latest  # Define the FCLI bootstrap version
     steps:
       - name: Checkout source code
@@ -38,15 +38,36 @@ jobs:
             exit 1
           fi
 
-      - name: Run Fortify SAST Scan
-        uses: fortify/github-action@v3
-        env:
-          FOD_URL: ${{ vars.FOD_URL }}
-          FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
-          FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
-          FOD_RELEASE: "257019"
-          SOURCE_DIR: ${{ env.SOURCE_DIR }}
-          DO_SAST_EXPORT: true
+      - name: Setup Fortify tools for SAST
+        uses: fortify/github-action/setup@v3
+        with:
+          fcli: bootstrapped
+          fod-uploader: latest
+
+      - name: Package code
+        run: |
+          cd ${{ env.SOURCE_DIR }}
+          scancentral package -bt none -o ../package.zip
+
+      - name: Upload and start SAST scan
+        uses: fortify/gha-setup-fod-uploader@v1
+        with:
+          fod-url: https://api.trial.fortify.com
+          client-id: ${{ secrets.FOD_CLIENT_ID }}
+          client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+          release-id: "257019"
+          file: package.zip
+          notes: "SAST scan from GitHub Actions"
+
+      - name: Wait for SAST scan to complete
+        run: |
+          fcli fod session login --url https://api.trial.fortify.com --client-id ${{ secrets.FOD_CLIENT_ID }} --client-secret ${{ secrets.FOD_CLIENT_SECRET }}
+          fcli fod sast-scan wait --rel "257019" --max-attempts 180 --wait-interval 30
+
+      - name: Export SARIF
+        run: |
+          fcli fod issue export-sast --rel "257019" --format sarif -f gh-fortify-sast.sarif
+          fcli fod session logout
 
       - name: Locate Fortify SAST SARIF report
         id: find-sast-sarif
@@ -73,15 +94,4 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: ${{ steps.find-sast-sarif.outputs.SARIF_PATH }}
-          category: fortify-sast
-
-      - name: Setup Fortify tools for DAST
-        if: env.HAS_DAST_URL == 'true'
-        uses: fortify/github-action/setup@v3
-        with:
-          fcli: bootstrapped
-          fod-uploader: latest
-        env:
-          FCLI_BOOTSTRAP_VERSION: ${{ env.FCLI_BOOTSTRAP_VERSION }}
-
-      
+          category: fortify-sast      
