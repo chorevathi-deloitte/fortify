@@ -26,6 +26,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: List source directory contents
+        run: |
+          echo "SOURCE_DIR: ${{ env.SOURCE_DIR }}"
+          if [ -d "${{ env.SOURCE_DIR }}" ]; then
+            echo "Directory exists. Listing contents:"
+            ls -la ${{ env.SOURCE_DIR }}
+            echo "Total files: $(find ${{ env.SOURCE_DIR }} -type f | wc -l)"
+          else
+            echo "Directory does not exist!"
+            exit 1
+          fi
+
       - name: Run Fortify SAST Scan
         uses: fortify/github-action@v3
         env:
