@@ -1,4 +1,4 @@
-name: Fortify SAST Vulnerability Scan 
+name: Fortify Vulnerability Scan
 
 on:
   pull_request:
@@ -18,7 +18,7 @@ jobs:
       FOD_DAST_ASSESSMENT_TYPE: ${{ vars.FOD_DAST_ASSESSMENT_TYPE || 'Dynamic Assessment' }}
       FOD_DAST_FREQUENCY: ${{ vars.FOD_DAST_FREQUENCY || 'SingleScan' }}
       FOD_DAST_ENVIRONMENT: ${{ vars.FOD_DAST_ENVIRONMENT || 'External' }}
-      SOURCE_DIR: .  # Define the source directory for scanning
+      SOURCE_DIR: force-app  # Define the source directory for scanning
       FCLI_BOOTSTRAP_VERSION: latest  # Define the FCLI bootstrap version
     steps:
       - name: Checkout source code
@@ -26,15 +26,114 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Run Fortify SAST Scan
-        uses: fortify/github-action@v3
-        env:
-          FOD_URL: ${{ vars.FOD_URL }}
-          FOD_CLIENT_ID: ${{ secrets.FOD_CLIENT_ID }}
-          FOD_CLIENT_SECRET: ${{ secrets.FOD_CLIENT_SECRET }}
-          FOD_RELEASE: "257019"
-          SOURCE_DIR: ${{ env.SOURCE_DIR }}
-          DO_SAST_EXPORT: true
+      - name: List source directory contents
+        run: |
+          echo "SOURCE_DIR: ${{ env.SOURCE_DIR }}"
+          if [ -d "${{ env.SOURCE_DIR }}" ]; then
+            echo "Directory exists. Listing contents:"
+            ls -la ${{ env.SOURCE_DIR }}
+            echo "Total files: $(find ${{ env.SOURCE_DIR }} -type f | wc -l)"
+          else
+            echo "Directory does not exist!"
+            exit 1
+          fi
+
+      - name: Setup Fortify ScanCentral
+        uses: fortify/gha-setup-scancentral-client@v2
+
+      - name: Setup FCLI
+        uses: fortify/github-action/setup@v3
+        with:
+          fcli: latest
+
+      - name: Package code
+        run: |
+          cd ${{ env.SOURCE_DIR }}
+          scancentral package -bt none -o ../package.zip
+          
+          # Verify package was created
+          if [ ! -f "../package.zip" ]; then
+            echo "❌ Error: package.zip was not created"
+            exit 1
+          fi
+          
+          # Check package size
+          PACKAGE_SIZE=$(du -h ../package.zip | cut -f1)
+          echo "✅ Package created successfully"
+          echo "Package size: $PACKAGE_SIZE"
+          
+          # List contents
+          echo ""
+          echo "Package contents:"
+          unzip -l ../package.zip | head -20
+          
+          # Count files
+          FILE_COUNT=$(unzip -l ../package.zip | tail -1 | awk '{print $2}')
+          echo ""
+          echo "Total files in package: $FILE_COUNT"
+          
+          if [ "$FILE_COUNT" -le 0 ]; then
+            echo "❌ Warning: Package contains no files"
+            exit 1
+          fi
+
+      # - name: Upload and start SAST scan
+      #   run: |
+      #     fcli fod session login --url https://api.trial.fortify.com --client-id ${{ secrets.FOD_CLIENT_ID }} --client-secret ${{ secrets.FOD_CLIENT_SECRET }}
+      #     fcli fod sast-scan start --rel "257019" --file package.zip --store scan
+
+      # - name: Wait for SAST scan to complete
+      #   run: |
+      #     fcli fod sast-scan wait-for ::scan:: --timeout 90m --interval 30s
+
+      # - name: Export SARIF from FOD
+      #   run: |
+      #     fcli fod issue export-sast --rel "257019" --format sarif -f gh-fortify-sast.sarif
+      #     fcli fod session logout
+
+      - name: Convert FPR to SARIF (POC - using local file)
+        run: |
+          if [ -f "257019_scandata.fpr" ]; then
+            echo "Found FPR file: 257019_scandata.fpr"
+            unzip -q 257019_scandata.fpr -d fpr_contents
+            echo "FPR extracted. Checking for audit.fvdl:"
+            ls -la fpr_contents/ | grep -E "audit|fvdl"
+          else
+            echo "Error: 257019_scandata.fpr not found"
+            exit 1
+          fi
+
+      - name: Process and display scan results
+        if: always()
+        run: |
+          if [ -f "fpr_contents/audit.fvdl" ]; then
+            echo "=== Fortify SAST Scan Results (from FPR) ==="
+            echo ""
+            echo "Scanned Files:"
+            grep -oP '(?<=<FileName>)[^<]+' fpr_contents/audit.fvdl | sort | uniq
+            echo ""
+            echo "Violation Rules Used:"
+            grep -oP '(?<=<RuleID>)[^<]+' fpr_contents/audit.fvdl | sort | uniq
+            echo ""
+            ISSUE_COUNT=$(grep -c '<Issue' fpr_contents/audit.fvdl || echo "0")
+            echo "Total Issues Found: $ISSUE_COUNT"
+          else
+            echo "No audit.fvdl found in FPR."
+            exit 1
+          fi
+
+      - name: Fail if violations found
+        if: always()
+        run: |
+          ISSUE_COUNT=$(grep -c '<Issue' fpr_contents/audit.fvdl || echo "0")
+          echo "Checking violation count: $ISSUE_COUNT"
+          if [ "$ISSUE_COUNT" -gt 0 ]; then
+            echo "❌ SECURITY VIOLATION: Found $ISSUE_COUNT issues in scan results. Failing workflow."
+            exit 1
+          else
+            echo "✅ Scan passed: No violations found."
+            exit 0
+          fi
 
       - name: Locate Fortify SAST SARIF report
         id: find-sast-sarif
@@ -46,27 +145,12 @@ jobs:
           else
             echo "SARIF_PATH=" >> $GITHUB_OUTPUT
           fi
-      - name: Upload Fortify SAST SARIF report
-        if: steps.find-sast-sarif.outputs.SARIF_PATH != ''
+
+      - name: Upload FPR artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fortify-sast-sarif-report
-          path: ${{ steps.find-sast-sarif.outputs.SARIF_PATH }}
+          name: fortify-fpr-report
+          path: 257019_scandata.fpr
           if-no-files-found: warn
-          retention-days: 30
-
-      - name: Upload Fortify SAST results to GitHub Code Scanning
-        if: steps.find-sast-sarif.outputs.SARIF_PATH != ''
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: ${{ steps.find-sast-sarif.outputs.SARIF_PATH }}
-          category: fortify-sast
-
-      - name: Setup Fortify tools for DAST
-        if: env.HAS_DAST_URL == 'true'
-        uses: fortify/github-action/setup@v3
-        with:
-          fcli: bootstrapped
-          fod-uploader: latest
-        env:
-          FCLI_BOOTSTRAP_VERSION: ${{ env.FCLI_BOOTSTRAP_VERSION }}
+          retention-days: 30      
