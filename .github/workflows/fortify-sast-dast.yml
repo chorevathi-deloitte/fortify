@@ -110,19 +110,18 @@ jobs:
         run: |
           set -euo pipefail
           echo "Starting FoD SAST scan against release $RELEASE_ID"
-          fod_args=(
-            -z "package.zip"
-            -aurl "$FOD_API_URL"
-            -purl "$FOD_URL"
-            -rid "$RELEASE_ID"
-            -tc "$FOD_TENANT"
-            -uc "$FOD_USER:$FOD_PAT"
-            -ep "SingleScanOnly"
-            -pp "DoNotStartScan"
-            -I "1"
-            -apf
-          )
-          java -jar "$FOD_UPLOAD_JAR" "${fod_args[@]}"
+          java -jar "$FOD_UPLOAD_JAR" \
+            -z package.zip \
+            -aurl "$FOD_API_URL" \
+            -purl "$FOD_URL" \
+            -rid "$RELEASE_ID" \
+            -tc "$FOD_TENANT" \
+            -uc "$FOD_USER" "$FOD_PAT" \
+            $FOD_UPLOADER_OPTS \
+            -n "$FOD_UPLOADER_NOTES"
+        env:
+          FOD_UPLOADER_OPTS: "-ep 2 -pp 0 -I 1 -apf"
+          FOD_UPLOADER_NOTES: "Triggered by GitHub Actions (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
 
       - name: Download Results
         uses: fortify/gha-fod-generate-sarif@1.1.0
