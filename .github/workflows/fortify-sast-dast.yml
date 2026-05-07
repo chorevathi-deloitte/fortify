@@ -20,6 +20,8 @@ jobs:
       FOD_DAST_ENVIRONMENT: ${{ vars.FOD_DAST_ENVIRONMENT || 'External' }}
       SOURCE_DIR: force-app  # Define the source directory for scanning
       FCLI_BOOTSTRAP_VERSION: latest  # Define the FCLI bootstrap version
+      RELEASE_ID: ${{ vars.FOD_RELEASE_ID }}  # Release ID for the new trial account
+      BYPASS_VIOLATIONS: ${{ vars.BYPASS_VIOLATIONS || false }}  # Set to true to bypass failure on violations
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -77,84 +79,105 @@ jobs:
             exit 1
           fi
 
-      # - name: Upload and start SAST scan
-      #   run: |
-      #     fcli fod session login --url https://api.trial.fortify.com --client-id ${{ secrets.FOD_CLIENT_ID }} --client-secret ${{ secrets.FOD_CLIENT_SECRET }}
-      #     fcli fod sast-scan start --rel "257019" --file package.zip --store scan
+    #   - name: Upload and start SAST scan
+    #     run: |
+    #       fcli fod session login --url https://api.trial.fortify.com --client-id ${{ secrets.FOD_CLIENT_ID }} --client-secret ${{ secrets.FOD_CLIENT_SECRET }}
+    #       fcli fod sast-scan start --rel "${{ env.RELEASE_ID }}" --file package.zip --store scan
 
-      # - name: Wait for SAST scan to complete
-      #   run: |
-      #     fcli fod sast-scan wait-for ::scan:: --timeout 90m --interval 30s
+    #   - name: Wait for SAST scan to complete
+    #     run: |
+    #       fcli fod sast-scan wait-for ::scan:: --timeout 90m --interval 30s
 
-      # - name: Export SARIF from FOD
-      #   run: |
-      #     fcli fod issue export-sast --rel "257019" --format sarif -f gh-fortify-sast.sarif
-      #     fcli fod session logout
+    #   - name: Export SARIF from FOD
+    #     run: |
+    #       fcli fod issue export-sast --rel "${{ env.RELEASE_ID }}" --format sarif -f gh-fortify-sast.sarif
+    #       fcli fod session logout
 
-      - name: Convert FPR to SARIF (POC - using local file)
+      - name: Check SARIF export
         run: |
-          if [ -f "scripts/257019_scandata scan 1.fpr" ]; then
-            echo "Found FPR file: scripts/257019_scandata scan 1.fpr"
-            unzip -q "scripts/257019_scandata scan 1.fpr" -d fpr_contents
-            echo "FPR extracted. Checking for audit.fvdl:"
-            ls -la fpr_contents/ | grep -E "audit|fvdl"
+          if [ -f "gh-fortify-sast.sarif" ]; then
+            SIZE=$(stat -c%s "gh-fortify-sast.sarif")
+            if [ "$SIZE" -gt 100 ]; then
+              echo "✅ SARIF exported successfully, size: $SIZE bytes"
+            else
+              echo "❌ SARIF file too small, may be empty or scan failed"
+              cat gh-fortify-sast.sarif || echo "File contents empty"
+              exit 1
+            fi
           else
-            echo "Error: scripts/257019_scandata scan 1.fpr not found"
+            echo "❌ SARIF file not found - scan may have failed"
             exit 1
           fi
 
       - name: Process and display scan results
         if: always()
         run: |
-          if [ -d "fpr_contents" ]; then
-            echo "=== Fortify SAST Scan Results (from FPR) ==="
-            echo ""
-            echo "FPR Contents:"
-            find fpr_contents -type f | sort
-            echo ""
-            echo "Searching for issues across all FPR files:"
-            ISSUE_COUNT=$(find fpr_contents -name "*.fvdl" -o -name "*.xml" | xargs grep -c '<Issue' 2>/dev/null | awk '{sum += $1} END {print sum+0}')
-            echo "Total Issues Found: $ISSUE_COUNT"
-            echo ""
-            echo "Scanned Files:"
-            find fpr_contents -name "*.fvdl" -o -name "*.xml" | xargs grep -oP '(?<=<FileName>)[^<]+' 2>/dev/null | sort | uniq
-            echo ""
-            echo "Violation Rules Used:"
-            find fpr_contents -name "*.fvdl" -o -name "*.xml" | xargs grep -oP '(?<=<RuleID>)[^<]+' 2>/dev/null | sort | uniq
-          else
-            echo "No fpr_contents directory found."
-            exit 1
+          echo "=== Fortify SAST Scan Results (from FoD) ==="
+          echo ""
+          
+          # Install jq if not present
+          if ! command -v jq &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y jq
           fi
+          
+          # Total violations
+          VIOLATION_COUNT=$(jq '.runs[0].results | length' gh-fortify-sast.sarif 2>/dev/null || echo "0")
+          echo "Total Violations Found: $VIOLATION_COUNT"
+          echo ""
+          
+          # List of scanned files
+          echo "Scanned Files:"
+          jq -r '.runs[0].artifacts[]?.location?.uri' gh-fortify-sast.sarif 2>/dev/null | sort | uniq | sed 's/^/- /'
+          echo ""
+          
+          # Violations per file
+          echo "Violations per File:"
+          jq -r '.runs[0].results[] | .locations[0].physicalLocation.artifactLocation.uri' gh-fortify-sast.sarif 2>/dev/null | sort | uniq -c | sort -nr | sed 's/^ *//;s/ /- /' | sed 's/^/- /'
+          echo ""
+          
+          # Violation rules
+          echo "Violation Rules:"
+          jq -r '.runs[0].results[] | .ruleId' gh-fortify-sast.sarif 2>/dev/null | sort | uniq | sed 's/^/- /'
 
       - name: Fail if violations found
         if: always()
         run: |
-          ISSUE_COUNT=$(grep -c '<Issue' fpr_contents/audit.fvdl || echo "0")
-          echo "Checking violation count: $ISSUE_COUNT"
-          if [ "$ISSUE_COUNT" -gt 0 ]; then
-            echo "❌ SECURITY VIOLATION: Found $ISSUE_COUNT issues in scan results. Failing workflow."
+          VIOLATION_COUNT=$(jq '.runs[0].results | length' gh-fortify-sast.sarif 2>/dev/null || echo "0")
+          echo "Checking violation count: $VIOLATION_COUNT"
+          if [ "$VIOLATION_COUNT" -gt 0 ] && [ "${{ env.BYPASS_VIOLATIONS }}" != "true" ]; then
+            echo "❌ SECURITY VIOLATION: Found $VIOLATION_COUNT issues in scan results. Failing workflow."
+            echo "To bypass this failure, set BYPASS_VIOLATIONS=true in repository variables."
             exit 1
+          elif [ "$VIOLATION_COUNT" -gt 0 ] && [ "${{ env.BYPASS_VIOLATIONS }}" == "true" ]; then
+            echo "⚠️ SECURITY VIOLATION: Found $VIOLATION_COUNT issues, but bypassing failure as requested."
+            exit 0
           else
             echo "✅ Scan passed: No violations found."
             exit 0
           fi
 
-      # - name: Locate Fortify SAST SARIF report
-      #   id: find-sast-sarif
-      #   run: |
-      #     set -euo pipefail
-      #     sarif=$(find . -name 'gh-fortify-sast.sarif' -o -name '*.sarif' | head -n 1 || true)
-      #     if [ -n "$sarif" ]; then
-      #       echo "SARIF_PATH=$sarif" >> $GITHUB_OUTPUT
-      #     else
-      #       echo "SARIF_PATH=" >> $GITHUB_OUTPUT
-      #     fi
+      - name: Locate Fortify SAST SARIF report
+        id: find-sast-sarif
+        run: |
+          set -euo pipefail
+          sarif=$(find . -name 'gh-fortify-sast.sarif' -o -name '*.sarif' | head -n 1 || true)
+          if [ -n "$sarif" ]; then
+            echo "SARIF_PATH=$sarif" >> $GITHUB_OUTPUT
+          else
+            echo "SARIF_PATH=" >> $GITHUB_OUTPUT
+          fi
 
-    #   - name: Upload FPR artifact
-    #     if: always()
-    #     uses: actions/upload-artifact@v4
-    #     with:
-    #       name: fortify-fpr-report
-    #       path: "scripts/257019_scandata scan 1.fpr"
-    #       if-no-files-found: warn
-    #       retention-days: 30      
+      - name: Upload SARIF to GitHub Security tab
+        if: steps.find-sast-sarif.outputs.SARIF_PATH != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.find-sast-sarif.outputs.SARIF_PATH }}
+
+      - name: Upload FPR artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortify-fpr-report
+          path: "gh-fortify-sast.sarif"
+          if-no-files-found: warn
+          retention-days: 30      
