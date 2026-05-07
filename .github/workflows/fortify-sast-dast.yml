@@ -116,8 +116,7 @@ jobs:
             -purl "$FOD_URL" \
             -rid "$RELEASE_ID" \
             -tc "$FOD_TENANT" \
-            -uc "$FOD_USER" \
-            -up "$FOD_PAT" \
+            -uc "$FOD_USER:$FOD_PAT" \
             -ep 2 -pp 0 -I 1 -apf
 
       - name: Download Results
