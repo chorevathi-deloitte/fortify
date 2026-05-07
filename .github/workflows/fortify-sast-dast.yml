@@ -93,13 +93,13 @@ jobs:
 
       - name: Convert FPR to SARIF (POC - using local file)
         run: |
-          if [ -f "257019_scandata.fpr" ]; then
-            echo "Found FPR file: 257019_scandata.fpr"
-            unzip -q 257019_scandata.fpr -d fpr_contents
+          if [ -f "scripts/257019_scandata.fpr" ]; then
+            echo "Found FPR file: scripts/257019_scandata.fpr"
+            unzip -q scripts/257019_scandata.fpr -d fpr_contents
             echo "FPR extracted. Checking for audit.fvdl:"
             ls -la fpr_contents/ | grep -E "audit|fvdl"
           else
-            echo "Error: 257019_scandata.fpr not found"
+            echo "Error: scripts/257019_scandata.fpr not found"
             exit 1
           fi
 
@@ -151,6 +151,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fortify-fpr-report
-          path: 257019_scandata.fpr
+          path: scripts/257019_scandata.fpr
           if-no-files-found: warn
           retention-days: 30      
