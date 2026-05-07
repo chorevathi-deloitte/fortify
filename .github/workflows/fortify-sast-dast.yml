@@ -106,19 +106,23 @@ jobs:
       - name: Process and display scan results
         if: always()
         run: |
-          if [ -f "fpr_contents/audit.fvdl" ]; then
+          if [ -d "fpr_contents" ]; then
             echo "=== Fortify SAST Scan Results (from FPR) ==="
             echo ""
+            echo "FPR Contents:"
+            find fpr_contents -type f | sort
+            echo ""
+            echo "Searching for issues across all FPR files:"
+            ISSUE_COUNT=$(find fpr_contents -name "*.fvdl" -o -name "*.xml" | xargs grep -c '<Issue' 2>/dev/null | awk '{sum += $1} END {print sum+0}')
+            echo "Total Issues Found: $ISSUE_COUNT"
+            echo ""
             echo "Scanned Files:"
-            grep -oP '(?<=<FileName>)[^<]+' fpr_contents/audit.fvdl | sort | uniq
+            find fpr_contents -name "*.fvdl" -o -name "*.xml" | xargs grep -oP '(?<=<FileName>)[^<]+' 2>/dev/null | sort | uniq
             echo ""
             echo "Violation Rules Used:"
-            grep -oP '(?<=<RuleID>)[^<]+' fpr_contents/audit.fvdl | sort | uniq
-            echo ""
-            ISSUE_COUNT=$(grep -c '<Issue' fpr_contents/audit.fvdl || echo "0")
-            echo "Total Issues Found: $ISSUE_COUNT"
+            find fpr_contents -name "*.fvdl" -o -name "*.xml" | xargs grep -oP '(?<=<RuleID>)[^<]+' 2>/dev/null | sort | uniq
           else
-            echo "No audit.fvdl found in FPR."
+            echo "No fpr_contents directory found."
             exit 1
           fi
 
@@ -135,22 +139,22 @@ jobs:
             exit 0
           fi
 
-      - name: Locate Fortify SAST SARIF report
-        id: find-sast-sarif
-        run: |
-          set -euo pipefail
-          sarif=$(find . -name 'gh-fortify-sast.sarif' -o -name '*.sarif' | head -n 1 || true)
-          if [ -n "$sarif" ]; then
-            echo "SARIF_PATH=$sarif" >> $GITHUB_OUTPUT
-          else
-            echo "SARIF_PATH=" >> $GITHUB_OUTPUT
-          fi
+      # - name: Locate Fortify SAST SARIF report
+      #   id: find-sast-sarif
+      #   run: |
+      #     set -euo pipefail
+      #     sarif=$(find . -name 'gh-fortify-sast.sarif' -o -name '*.sarif' | head -n 1 || true)
+      #     if [ -n "$sarif" ]; then
+      #       echo "SARIF_PATH=$sarif" >> $GITHUB_OUTPUT
+      #     else
+      #       echo "SARIF_PATH=" >> $GITHUB_OUTPUT
+      #     fi
 
-      # - name: Upload FPR artifact
-      #   if: always()
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: fortify-fpr-report
-      #     path: "scripts/257019_scandata scan 1.fpr"
-      #     if-no-files-found: warn
-      #     retention-days: 30      
+    #   - name: Upload FPR artifact
+    #     if: always()
+    #     uses: actions/upload-artifact@v4
+    #     with:
+    #       name: fortify-fpr-report
+    #       path: "scripts/257019_scandata scan 1.fpr"
+    #       if-no-files-found: warn
+    #       retention-days: 30      
