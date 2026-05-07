@@ -120,7 +120,7 @@ jobs:
             $FOD_UPLOADER_OPTS \
             -n "$FOD_UPLOADER_NOTES"
         env:
-          FOD_UPLOADER_OPTS: "-ep 2 -pp 0 -I 1 -apf"
+          FOD_UPLOADER_OPTS: "-ep 2 -pp 2 -I 1 -apf"
           FOD_UPLOADER_NOTES: "Triggered by GitHub Actions (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
 
       - name: Download Results
