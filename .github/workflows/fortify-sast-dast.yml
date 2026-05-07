@@ -2,26 +2,41 @@ name: Fortify Vulnerability Scan
 
 on:
   workflow_dispatch:
+    inputs:
+      bypass_violations:
+        description: 'Bypass violations and pass the workflow even if issues are found'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
   pull_request:
+    types: [opened, synchronize]
     branches:
       - main
+
+concurrency:
+  group: fortify-scan-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   fortify-sast-dast:
     name: Fortify on Demand Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       contents: read
       security-events: write
     env:
-      FOD_URL: ${{ vars.FOD_URL }}
-      FOD_API_URL: ${{ vars.FOD_API_URL || 'https://api.trial.fortify.com' }}
+      FOD_URL: ${{ vars.FOD_URL || 'https://ams.fortify.com' }}
+      FOD_API_URL: ${{ vars.FOD_API_URL || 'https://api.ams.fortify.com' }}
       FOD_TENANT: ${{ secrets.FOD_TENANT }}
       FOD_USER: ${{ secrets.FOD_USER }}
       FOD_PAT: ${{ secrets.FOD_PAT }}
       SOURCE_DIR: force-app  # Define the source directory for scanning
       RELEASE_ID: ${{ secrets.FOD_RELEASE_ID }}  # Release ID for the new trial account
-      BYPASS_VIOLATIONS: ${{ vars.BYPASS_VIOLATIONS || 'false' }}  # Set to true to bypass failure on violations
+      BYPASS_VIOLATIONS: ${{ inputs.bypass_violations || vars.BYPASS_VIOLATIONS || 'false' }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -120,13 +135,15 @@ jobs:
             $FOD_UPLOADER_OPTS \
             -n "$FOD_UPLOADER_NOTES"
         env:
+          FOD_URL: "https://ams.fortify.com"
+          FOD_API_URL: "https://api.ams.fortify.com"
           FOD_UPLOADER_OPTS: "-ep 2 -pp 2 -I 1 -apf"
           FOD_UPLOADER_NOTES: "Triggered by GitHub Actions (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
 
       - name: Download Results
         uses: fortify/gha-fod-generate-sarif@1.1.0
         with:
-          base-url: ${{ env.FOD_URL }}
+          base-url: "https://ams.fortify.com"
           tenant: ${{ env.FOD_TENANT }}
           user: ${{ env.FOD_USER }}
           password: ${{ env.FOD_PAT }}
