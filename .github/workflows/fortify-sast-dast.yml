@@ -45,7 +45,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 1.8
+          java-version: 8
 
       - name: Setup Fortify ScanCentral
         uses: fortify/gha-setup-scancentral-client@v2
