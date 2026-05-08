@@ -24,7 +24,7 @@ jobs:
   fortify-sast-dast:
     name: Fortify on Demand Scan
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 20
     permissions:
       contents: read
       security-events: write
@@ -57,14 +57,12 @@ jobs:
           fi
 
       - name: Setup Java
-        if: ${{ false }}   # re-enable when scan step is re-enabled
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 8
 
       - name: Setup Fortify ScanCentral
-        if: ${{ false }}   # re-enable when scan step is re-enabled
         uses: fortify/gha-setup-scancentral-client@v2
 
       - name: Package changed PR files
@@ -121,7 +119,6 @@ jobs:
           fi
 
       - name: Download Fortify on Demand Universal CI Tool
-        if: ${{ false }}   # re-enable when scan step is re-enabled
         uses: fortify/gha-setup-fod-uploader@v1
 
       - name: Perform SAST scan
@@ -155,6 +152,25 @@ jobs:
           release-id: ${{ env.RELEASE_ID }}
           output: ./sarif/output.sarif
 
+      - name: Retry SARIF fetch once if missing
+        if: ${{ always() && hashFiles('sarif/output.sarif') == '' }}
+        continue-on-error: true
+        run: |
+          echo "SARIF not found after first fetch. Waiting 60s for FoD report propagation, then retrying..."
+          sleep 60
+
+      - name: Download Results (retry)
+        if: ${{ always() && hashFiles('sarif/output.sarif') == '' }}
+        continue-on-error: true
+        uses: fortify/gha-fod-generate-sarif@1.1.0
+        with:
+          base-url: "https://trial.fortify.com"
+          tenant: ${{ env.FOD_TENANT }}
+          user: ${{ env.FOD_USER }}
+          password: ${{ env.FOD_PAT }}
+          release-id: ${{ env.RELEASE_ID }}
+          output: ./sarif/output.sarif
+
       - name: Check SARIF export
         run: |
           if [ -f "./sarif/output.sarif" ]; then
@@ -166,7 +182,8 @@ jobs:
               exit 1
             fi
           else
-            echo "❌ SARIF file not found - scan may have failed"
+            echo "❌ SARIF file not found after retry - scan may have failed or report is not ready yet"
+            echo "Check FoD release status and re-run once scan status is Completed."
             exit 1
           fi
 
@@ -319,8 +336,8 @@ jobs:
           fi
 
       - name: Upload SARIF to GitHub Security tab
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        if: ${{ always() && hashFiles('sarif/output.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: ./sarif/output.sarif
 
