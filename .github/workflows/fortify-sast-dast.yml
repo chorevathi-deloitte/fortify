@@ -68,7 +68,6 @@ jobs:
         uses: fortify/gha-setup-scancentral-client@v2
 
       - name: Package changed PR files
-        if: ${{ false }}   # re-enable when scan step is re-enabled
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
@@ -250,6 +249,54 @@ jobs:
           path: ./sarif/fortify-results.csv
           if-no-files-found: warn
           retention-days: 30
+
+      - name: Generate workflow summary
+        if: always()
+        run: |
+          SARIF=./sarif/output.sarif
+
+          {
+            echo "## 🔍 Fortify SAST Scan Summary"
+            echo ""
+
+            if [ ! -f "$SARIF" ]; then
+              echo "⚠️ **No scan results available** — scan may be incomplete or in progress."
+              echo ""
+              echo "[View full logs](#) | [Download SARIF](#) | [Download CSV](#)"
+              echo ""
+            else
+              TOTAL=$(jq '.runs[0].results | length' "$SARIF" 2>/dev/null || echo "0")
+              CRITICAL=$(jq '[.runs[0].results[]? | select(.properties."fortify-severity" == "critical")] | length' "$SARIF" 2>/dev/null || echo "0")
+              HIGH=$(jq '[.runs[0].results[]? | select(.properties."fortify-severity" == "high")] | length' "$SARIF" 2>/dev/null || echo "0")
+              MEDIUM=$(jq '[.runs[0].results[]? | select(.properties."fortify-severity" == "medium")] | length' "$SARIF" 2>/dev/null || echo "0")
+              LOW=$(jq '[.runs[0].results[]? | select(.properties."fortify-severity" == "low")] | length' "$SARIF" 2>/dev/null || echo "0")
+
+              FILES=$(jq '.runs[0].artifacts[]?.location?.uri' "$SARIF" 2>/dev/null | wc -l)
+
+              echo "| Metric | Value |"
+              echo "|--------|-------|"
+              echo "| **Total Issues** | $TOTAL |"
+              echo "| **Critical** | $CRITICAL |"
+              echo "| **High** | $HIGH |"
+              echo "| **Medium** | $MEDIUM |"
+              echo "| **Low** | $LOW |"
+              echo "| **Scanned Files** | $FILES |"
+              echo ""
+
+              if [ "$TOTAL" -eq 0 ]; then
+                echo "✅ **No violations detected** — code passed security scan."
+              else
+                echo "⚠️ **$TOTAL violation(s) found** — review results below or download reports."
+              fi
+
+              echo ""
+              echo "### 📊 Reports & Artifacts"
+              echo ""
+              echo "- 📋 [Download CSV Report](actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}) – Spreadsheet-friendly format for team review"
+              echo "- 📄 [Download SARIF Report](actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}) – GitHub Code Scanning format"
+              echo ""
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail if violations found
         if: always()
