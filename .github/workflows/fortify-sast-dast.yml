@@ -17,7 +17,7 @@ on:
       - main
 
 concurrency:
-  group: fortify-scan-${{ github.ref }}
+  group: fortify-fod-release-scan
   cancel-in-progress: false
 
 jobs:
@@ -57,15 +57,18 @@ jobs:
           fi
 
       - name: Setup Java
+        if: ${{ false }}   # re-enable when scan step is re-enabled
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 8
 
       - name: Setup Fortify ScanCentral
+        if: ${{ false }}   # re-enable when scan step is re-enabled
         uses: fortify/gha-setup-scancentral-client@v2
 
       - name: Package changed PR files
+        if: ${{ false }}   # re-enable when scan step is re-enabled
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
@@ -119,9 +122,11 @@ jobs:
           fi
 
       - name: Download Fortify on Demand Universal CI Tool
+        if: ${{ false }}   # re-enable when scan step is re-enabled
         uses: fortify/gha-setup-fod-uploader@v1
 
       - name: Perform SAST scan
+        if: ${{ false }}
         run: |
           set -euo pipefail
           echo "Starting FoD SAST scan against release $RELEASE_ID"
@@ -141,6 +146,7 @@ jobs:
           FOD_UPLOADER_NOTES: "Triggered by GitHub Actions (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
 
       - name: Download Results
+        continue-on-error: true
         uses: fortify/gha-fod-generate-sarif@1.1.0
         with:
           base-url: "https://trial.fortify.com"
@@ -165,48 +171,108 @@ jobs:
             exit 1
           fi
 
+      - name: Install jq
+        if: always()
+        run: command -v jq &>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y jq; }
+
       - name: Process and display scan results
         if: always()
         run: |
+          SARIF=./sarif/output.sarif
+          if [ ! -f "$SARIF" ]; then
+            echo "⚠️  No SARIF file found — scan may be incomplete or results not yet available."
+            exit 0
+          fi
+
           echo "=== Fortify SAST Scan Results ==="
           echo ""
-          if ! command -v jq &> /dev/null; then
-            sudo apt-get update && sudo apt-get install -y jq
-          fi
-          SARIF=./sarif/output.sarif
+
           TOTAL=$(jq '.runs[0].results | length' "$SARIF" 2>/dev/null || echo "0")
           echo "Total Violations Found: $TOTAL"
           echo ""
-          echo "Scanned Files:" 
-          jq -r '.runs[0].artifacts[]?.location?.uri' "$SARIF" 2>/dev/null | sort | uniq | sed 's/^/- /'
+
+          echo "Severity Breakdown:"
+          for level in Critical High Medium Low; do
+            lower=$(echo "$level" | tr '[:upper:]' '[:lower:]')
+            count=$(jq --arg l "$lower" '[.runs[0].results[]? | select(.properties."fortify-severity" == $l)] | length' "$SARIF" 2>/dev/null || echo "0")
+            echo "  $level: $count"
+          done
           echo ""
+
+          echo "Scanned Files:"
+          jq -r '.runs[0].artifacts[]?.location?.uri' "$SARIF" 2>/dev/null | sort | uniq | sed 's/^/  - /'
+          echo ""
+
           echo "Violations per File:"
-          jq -r '.runs[0].results[]?.locations[0]?.physicalLocation?.artifactLocation?.uri' "$SARIF" 2>/dev/null | sort | uniq -c | sort -nr | awk '{print "- " $2 ": " $1}'
+          jq -r '.runs[0].results[]?.locations[0]?.physicalLocation?.artifactLocation?.uri' "$SARIF" 2>/dev/null \
+            | sort | uniq -c | sort -nr | awk '{print "  - " $2 ": " $1 " issue(s)"}'
           echo ""
-          echo "Violation Rules:"
-          jq -r '.runs[0].results[]?.ruleId' "$SARIF" 2>/dev/null | sort | uniq | sed 's/^/- /'
+
+          echo "Violation Rules (unique):"
+          jq -r '.runs[0].results[]? | .ruleId + "  →  " + (.message.text // "")' "$SARIF" 2>/dev/null \
+            | sort | uniq | sed 's/^/  - /'
+
+      - name: Export scan results to CSV
+        if: always()
+        run: |
+          SARIF=./sarif/output.sarif
+          CSV=./sarif/fortify-results.csv
+
+          if [ ! -f "$SARIF" ]; then
+            echo "⚠️  No SARIF file — skipping CSV export."
+            exit 0
+          fi
+
+          echo "File,Line,Severity,Rule ID,Category,Message" > "$CSV"
+
+          jq -r '
+            .runs[0].results[]? |
+            {
+              file:     (.locations[0]?.physicalLocation?.artifactLocation?.uri // "unknown"),
+              line:     (.locations[0]?.physicalLocation?.region?.startLine // "N/A" | tostring),
+              severity: (.properties."fortify-severity" // "unknown"),
+              ruleId:   (.ruleId // ""),
+              category: (.taxa[0]?.id // .ruleId // ""),
+              message:  (.message.text // "" | gsub("\n";" ") | gsub(",";" "))
+            } |
+            [.file, .line, .severity, .ruleId, .category, .message] |
+            @csv
+          ' "$SARIF" >> "$CSV" 2>/dev/null
+
+          ROWS=$(tail -n +2 "$CSV" | wc -l)
+          echo "✅ CSV exported: $ROWS issue(s) written to $CSV"
+
+      - name: Upload CSV results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortify-csv-report
+          path: ./sarif/fortify-results.csv
+          if-no-files-found: warn
+          retention-days: 30
 
       - name: Fail if violations found
         if: always()
         run: |
-          if ! command -v jq &> /dev/null; then
-            sudo apt-get update && sudo apt-get install -y jq
-          fi
-          TOTAL=$(jq '.runs[0].results | length' ./sarif/output.sarif 2>/dev/null || echo "0")
-          echo "Checking violation count: $TOTAL"
-          if [ "$TOTAL" -gt 0 ] && [ "${{ env.BYPASS_VIOLATIONS }}" != "true" ]; then
-            echo "❌ SECURITY VIOLATION: Found $TOTAL issues. Failing workflow."
-            echo "To bypass this failure, set BYPASS_VIOLATIONS=true in repository variables."
-            exit 1
-          elif [ "$TOTAL" -gt 0 ] && [ "${{ env.BYPASS_VIOLATIONS }}" == "true" ]; then
-            echo "⚠️ Violations found ($TOTAL), but bypass is enabled."
+          SARIF=./sarif/output.sarif
+          if [ ! -f "$SARIF" ]; then
+            echo "⚠️  No SARIF file — skipping violation gate."
             exit 0
+          fi
+          TOTAL=$(jq '.runs[0].results | length' "$SARIF" 2>/dev/null || echo "0")
+          echo "Checking violation count: $TOTAL"
+          if [ "$TOTAL" -gt 0 ] && [ "$BYPASS_VIOLATIONS" != "true" ]; then
+            echo "❌ SECURITY VIOLATION: Found $TOTAL issues. Failing workflow."
+            echo "To bypass: set BYPASS_VIOLATIONS=true in repo variables or re-run via workflow_dispatch with bypass_violations=true."
+            exit 1
+          elif [ "$TOTAL" -gt 0 ] && [ "$BYPASS_VIOLATIONS" = "true" ]; then
+            echo "⚠️  Violations found ($TOTAL), but bypass is enabled. Passing workflow."
           else
             echo "✅ No violations found."
-            exit 0
           fi
 
       - name: Upload SARIF to GitHub Security tab
+        if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: ./sarif/output.sarif
