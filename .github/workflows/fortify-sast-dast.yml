@@ -138,14 +138,13 @@ jobs:
             exit 1
           fi
 
-      - name: Verify package exists
-        run: |
-          if [ ! -f "$GITHUB_WORKSPACE/package.zip" ]; then
-            echo "❌ Error: package.zip not found after check/create steps"
-            exit 1
-          fi
-          PACKAGE_SIZE=$(du -h "$GITHUB_WORKSPACE/package.zip" | cut -f1)
-          echo "✅ Package verified. Size: $PACKAGE_SIZE"
+      - name: Upload package.zip as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortify-package
+          path: ./package.zip
+          retention-days: 30
+          if-no-files-found: error
 
       - name: Download Fortify on Demand Universal CI Tool
         uses: fortify/gha-setup-fod-uploader@v1
