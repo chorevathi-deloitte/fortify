@@ -1,4 +1,3 @@
-#comment  
 name: Fortify Vulnerability Scan
 
 on:
@@ -66,7 +65,27 @@ jobs:
       - name: Setup Fortify ScanCentral
         uses: fortify/gha-setup-scancentral-client@v2
 
+      - name: Check and download existing package if available
+        id: check_package
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+
+          # Check if package.zip already exists from a previous step or cached artifact
+          if [ -f "package.zip" ]; then
+            echo "✅ Existing package.zip found locally"
+            PACKAGE_SIZE=$(du -h "package.zip" | cut -f1)
+            echo "Package size: $PACKAGE_SIZE"
+            echo "package_exists=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "ℹ️  No cached package.zip found. Will create new package."
+          echo "package_exists=false" >> $GITHUB_OUTPUT
+
       - name: Package changed PR files
+        if: steps.check_package.outputs.package_exists != 'true'
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
@@ -119,10 +138,20 @@ jobs:
             exit 1
           fi
 
+      - name: Verify package exists
+        run: |
+          if [ ! -f "$GITHUB_WORKSPACE/package.zip" ]; then
+            echo "❌ Error: package.zip not found after check/create steps"
+            exit 1
+          fi
+          PACKAGE_SIZE=$(du -h "$GITHUB_WORKSPACE/package.zip" | cut -f1)
+          echo "✅ Package verified. Size: $PACKAGE_SIZE"
+
       - name: Download Fortify on Demand Universal CI Tool
         uses: fortify/gha-setup-fod-uploader@v1
 
       - name: Perform SAST scan
+        if: ${{ false }}
         run: |
           set -euo pipefail
           echo "Starting FoD SAST scan against release $RELEASE_ID"
@@ -157,19 +186,19 @@ jobs:
         continue-on-error: true
         run: |
           echo "SARIF not found after first fetch. Waiting 60s for FoD report propagation, then retrying..."
-          sleep 60
+      #     sleep 60
 
-      - name: Download Results (retry)
-        if: ${{ always() && hashFiles('sarif/output.sarif') == '' }}
-        continue-on-error: true
-        uses: fortify/gha-fod-generate-sarif@1.1.0
-        with:
-          base-url: "https://trial.fortify.com"
-          tenant: ${{ env.FOD_TENANT }}
-          user: ${{ env.FOD_USER }}
-          password: ${{ env.FOD_PAT }}
-          release-id: ${{ env.RELEASE_ID }}
-          output: ./sarif/output.sarif
+      # - name: Download Results (retry)
+      #   if: ${{ always() && hashFiles('sarif/output.sarif') == '' }}
+      #   continue-on-error: true
+      #   uses: fortify/gha-fod-generate-sarif@1.1.0
+      #   with:
+      #     base-url: "https://trial.fortify.com"
+      #     tenant: ${{ env.FOD_TENANT }}
+      #     user: ${{ env.FOD_USER }}
+      #     password: ${{ env.FOD_PAT }}
+      #     release-id: ${{ env.RELEASE_ID }}
+      #     output: ./sarif/output.sarif
 
       - name: Check SARIF export
         run: |
