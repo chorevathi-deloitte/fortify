@@ -122,7 +122,6 @@ jobs:
         uses: fortify/gha-setup-fod-uploader@v1
 
       - name: Perform SAST scan
-        if: ${{ false }}
         run: |
           set -euo pipefail
           echo "Starting FoD SAST scan against release $RELEASE_ID"
