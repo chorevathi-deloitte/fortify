@@ -150,7 +150,6 @@ jobs:
         uses: fortify/gha-setup-fod-uploader@v1
 
       - name: Perform SAST scan
-        if: ${{ false }}
         run: |
           set -euo pipefail
           echo "Starting FoD SAST scan against release $RELEASE_ID"
@@ -185,19 +184,19 @@ jobs:
         continue-on-error: true
         run: |
           echo "SARIF not found after first fetch. Waiting 60s for FoD report propagation, then retrying..."
-      #     sleep 60
+          sleep 60
 
-      # - name: Download Results (retry)
-      #   if: ${{ always() && hashFiles('sarif/output.sarif') == '' }}
-      #   continue-on-error: true
-      #   uses: fortify/gha-fod-generate-sarif@1.1.0
-      #   with:
-      #     base-url: "https://trial.fortify.com"
-      #     tenant: ${{ env.FOD_TENANT }}
-      #     user: ${{ env.FOD_USER }}
-      #     password: ${{ env.FOD_PAT }}
-      #     release-id: ${{ env.RELEASE_ID }}
-      #     output: ./sarif/output.sarif
+      - name: Download Results (retry)
+        if: ${{ always() && hashFiles('sarif/output.sarif') == '' }}
+        continue-on-error: true
+        uses: fortify/gha-fod-generate-sarif@1.1.0
+        with:
+          base-url: "https://trial.fortify.com"
+          tenant: ${{ env.FOD_TENANT }}
+          user: ${{ env.FOD_USER }}
+          password: ${{ env.FOD_PAT }}
+          release-id: ${{ env.RELEASE_ID }}
+          output: ./sarif/output.sarif
 
       - name: Check SARIF export
         run: |
