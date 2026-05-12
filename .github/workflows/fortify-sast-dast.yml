@@ -84,40 +84,17 @@ jobs:
           echo "ℹ️  No cached package.zip found. Will create new package."
           echo "package_exists=false" >> $GITHUB_OUTPUT
 
-      - name: Package changed PR files
+      - name: Package source for FoD
         if: steps.check_package.outputs.package_exists != 'true'
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
 
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            BASE_REF="${{ github.event.pull_request.base.ref }}"
-            echo "Pull request packaging mode: using changed files against origin/$BASE_REF"
-            CHANGED_FILES=$(git diff --name-only --diff-filter=ACMRTUX origin/$BASE_REF...HEAD -- "${{ env.SOURCE_DIR }}" || true)
-          else
-            echo "Non-PR run; packaging all files under ${{ env.SOURCE_DIR }}"
-            CHANGED_FILES=$(git ls-files "${{ env.SOURCE_DIR }}")
-          fi
-
-          echo "Changed files to include:"
-          echo "$CHANGED_FILES"
-          echo ""
-
-          if [ -z "$CHANGED_FILES" ]; then
-            echo "No changed files found under ${{ env.SOURCE_DIR }}. Packaging full source directory."
-            cd "${{ env.SOURCE_DIR }}"
-            scancentral package -bt none -o ../package.zip
-          else
-            TMP_DIR=$(mktemp -d)
-            echo "$CHANGED_FILES" | while IFS= read -r file; do
-              if [ -f "$file" ]; then
-                mkdir -p "$TMP_DIR/$(dirname "$file")"
-                cp --parents "$file" "$TMP_DIR"
-              fi
-            done
-            cd "$TMP_DIR"
-            scancentral package -bt none -o "$GITHUB_WORKSPACE/package.zip"
-          fi
+          # FoD upload/processing can fail on partial PR-only bundles for some stacks.
+          # Package the full source tree to produce a stable ScanCentral archive.
+          echo "Packaging full source directory: ${{ env.SOURCE_DIR }}"
+          cd "${{ env.SOURCE_DIR }}"
+          scancentral package -bt none -o ../package.zip
 
           if [ ! -f "$GITHUB_WORKSPACE/package.zip" ]; then
             echo "❌ Error: package.zip was not created"
@@ -150,6 +127,7 @@ jobs:
         uses: fortify/gha-setup-fod-uploader@v1
 
       - name: Perform SAST scan
+        if: ${{ env.RELEASE_ID != '' && env.FOD_TENANT != '' && env.FOD_USER != '' && env.FOD_PAT != '' }}
         run: |
           set -euo pipefail
           echo "Starting FoD SAST scan against release $RELEASE_ID"
