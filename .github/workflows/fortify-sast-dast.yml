@@ -1,0 +1,367 @@
+name: Fortify Vulnerability Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      bypass_violations:
+        description: 'Bypass violations and pass the workflow even if issues are found'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+  pull_request:
+    types: [opened, synchronize]
+    branches:
+      - main
+
+concurrency:
+  group: fortify-fod-release-scan
+  cancel-in-progress: false
+
+jobs:
+  fortify-sast-dast:
+    name: Fortify on Demand Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      FOD_URL: ${{ vars.FOD_URL || 'https://trial.fortify.com' }}
+      FOD_API_URL: ${{ vars.FOD_API_URL || 'https://api.trial.fortify.com' }}
+      FOD_TENANT: ${{ secrets.FOD_TENANT }}
+      FOD_USER: ${{ secrets.FOD_USER }}
+      FOD_PAT: ${{ secrets.FOD_PAT }}
+      SOURCE_DIR: force-app  # Define the source directory for scanning
+      RELEASE_ID: ${{ secrets.FOD_RELEASE_ID }}  # Release ID for the new trial account
+      BYPASS_VIOLATIONS: ${{ inputs.bypass_violations || vars.BYPASS_VIOLATIONS || 'false' }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: List source directory contents
+        run: |
+          echo "SOURCE_DIR: ${{ env.SOURCE_DIR }}"
+          if [ -d "${{ env.SOURCE_DIR }}" ]; then
+            echo "Directory exists. Listing files to be scanned:"
+            find "${{ env.SOURCE_DIR }}" -type f | sort | sed 's/^/- /'
+            echo ""
+            echo "Total source files: $(find "${{ env.SOURCE_DIR }}" -type f | wc -l)"
+          else
+            echo "Directory does not exist!"
+            exit 1
+          fi
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 8
+
+      - name: Setup Fortify ScanCentral
+        uses: fortify/gha-setup-scancentral-client@v2
+
+      - name: Setup Fortify CLI
+        uses: fortify/github-action/setup@v3
+        with:
+          fcli: bootstrapped
+
+      - name: Package source for FoD
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+
+          # FoD upload/processing can fail on partial PR-only bundles for some stacks.
+          # Package the full source tree to produce a stable ScanCentral archive.
+          echo "Packaging full source directory: ${{ env.SOURCE_DIR }}"
+          cd "${{ env.SOURCE_DIR }}"
+          scancentral package -bt none -o ../package.zip
+
+          if [ ! -f "$GITHUB_WORKSPACE/package.zip" ]; then
+            echo "❌ Error: package.zip was not created"
+            exit 1
+          fi
+
+          PACKAGE_SIZE=$(du -h "$GITHUB_WORKSPACE/package.zip" | cut -f1)
+          echo "✅ Package created successfully"
+          echo "Package size: $PACKAGE_SIZE"
+          echo ""
+          echo "Package file list:"
+          unzip -l "$GITHUB_WORKSPACE/package.zip" | sed '1,3d;$d' | awk '{print "- " $4}'
+          echo ""
+          FILE_COUNT=$(unzip -l "$GITHUB_WORKSPACE/package.zip" | tail -1 | awk '{print $2}')
+          echo "Total files in package: $FILE_COUNT"
+          if [ "$FILE_COUNT" -le 0 ]; then
+            echo "❌ Warning: Package contains no files"
+            exit 1
+          fi
+
+      - name: Upload package.zip as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortify-package
+          path: ./package.zip
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Perform SAST scan (fcli)
+        if: ${{ env.RELEASE_ID != '' && env.FOD_TENANT != '' && env.FOD_USER != '' && env.FOD_PAT != '' }}
+        run: |
+          set -euo pipefail
+
+          echo "Logging in to FoD API..."
+          fcli fod session login \
+            --url "$FOD_API_URL" \
+            --tenant "$FOD_TENANT" \
+            --user "$FOD_USER" \
+            --password "$FOD_PAT"
+
+          echo "Validating release access for RELEASE_ID=$RELEASE_ID"
+          fcli fod release get "$RELEASE_ID" -o json > release.json
+
+          echo "Checking for active Static scans on this release..."
+          fcli fod release lss --rel="$RELEASE_ID" \
+            -q "scanType=='Static' && (analysisStatusType=='InProgress' || analysisStatusType=='Waiting' || analysisStatusType=='Paused')" \
+            -o json > active-static-scans.json
+
+          ACTIVE_COUNT=$(python -c "import json; print(len(json.load(open('active-static-scans.json'))))")
+          if [ "$ACTIVE_COUNT" -gt 0 ]; then
+            echo "❌ A Static scan is already in progress/queued/paused for this release."
+            echo "Existing scans:"
+            cat active-static-scans.json
+            exit 1
+          fi
+
+          echo "Ensuring SAST scan configuration exists on the release..."
+          fcli fod sast-scan setup --rel="$RELEASE_ID" \
+            --audit-preference="Automated" \
+            --assessment-type="Static Assessment" \
+            --frequency="Subscription" \
+            --skip-if-exists || \
+          fcli fod sast-scan setup --rel="$RELEASE_ID" \
+            --audit-preference="Automated" \
+            --assessment-type="Static Assessment" \
+            --frequency="SingleScan" \
+            --skip-if-exists
+
+          echo "Starting FoD SAST scan against release $RELEASE_ID"
+          fcli fod sast-scan start --rel="$RELEASE_ID" -f package.zip -o json > scan-start.json
+          echo "✅ Scan submitted"
+          cat scan-start.json
+
+          echo "Logging out FoD session"
+          fcli fod session logout || true
+        env:
+          FOD_URL: "https://trial.fortify.com"
+          FOD_API_URL: "https://api.trial.fortify.com"
+
+      - name: Download Results
+        continue-on-error: true
+        uses: fortify/gha-fod-generate-sarif@1.1.0
+        with:
+          base-url: "https://trial.fortify.com"
+          tenant: ${{ env.FOD_TENANT }}
+          user: ${{ env.FOD_USER }}
+          password: ${{ env.FOD_PAT }}
+          release-id: ${{ env.RELEASE_ID }}
+          output: ./sarif/output.sarif
+
+      - name: Retry SARIF fetch once if missing
+        if: ${{ always() && hashFiles('sarif/output.sarif') == '' }}
+        run: |
+          echo "SARIF not found after first fetch. Waiting 60s for FoD report propagation, then retrying..."
+          sleep 60
+
+      - name: Download Results (retry)
+        if: ${{ always() && hashFiles('sarif/output.sarif') == '' }}
+        uses: fortify/gha-fod-generate-sarif@1.1.0
+        with:
+          base-url: "https://trial.fortify.com"
+          tenant: ${{ env.FOD_TENANT }}
+          user: ${{ env.FOD_USER }}
+          password: ${{ env.FOD_PAT }}
+          release-id: ${{ env.RELEASE_ID }}
+          output: ./sarif/output.sarif
+
+      - name: Check SARIF export
+        run: |
+          if [ -f "./sarif/output.sarif" ]; then
+            SIZE=$(stat -c%s "./sarif/output.sarif")
+            echo "SARIF file size: $SIZE bytes"
+            if [ "$SIZE" -le 100 ]; then
+              echo "❌ SARIF file appears too small"
+              cat ./sarif/output.sarif || true
+              exit 1
+            fi
+          else
+            echo "❌ SARIF file not found after retry - scan may have failed or report is not ready yet"
+            echo "Check FoD release status and re-run once scan status is Completed."
+            exit 1
+          fi
+
+      - name: Install jq
+        if: always()
+        run: command -v jq &>/dev/null || { sudo apt-get update -qq && sudo apt-get install -y jq; }
+
+      - name: Process and display scan results
+        if: always()
+        run: |
+          SARIF=./sarif/output.sarif
+          if [ ! -f "$SARIF" ]; then
+            echo "⚠️  No SARIF file found — scan may be incomplete or results not yet available."
+            exit 0
+          fi
+
+          echo "=== Fortify SAST Scan Results ==="
+          echo ""
+
+          TOTAL=$(jq '.runs[0].results | length' "$SARIF" 2>/dev/null || echo "0")
+          echo "Total Violations Found: $TOTAL"
+          echo ""
+
+          echo "Severity Breakdown:"
+          for level in Critical High Medium Low; do
+            lower=$(echo "$level" | tr '[:upper:]' '[:lower:]')
+            count=$(jq --arg l "$lower" '[.runs[0].results[]? | select(.properties."fortify-severity" == $l)] | length' "$SARIF" 2>/dev/null || echo "0")
+            echo "  $level: $count"
+          done
+          echo ""
+
+          echo "Scanned Files:"
+          jq -r '.runs[0].artifacts[]?.location?.uri' "$SARIF" 2>/dev/null | sort | uniq | sed 's/^/  - /'
+          echo ""
+
+          echo "Violations per File:"
+          jq -r '.runs[0].results[]?.locations[0]?.physicalLocation?.artifactLocation?.uri' "$SARIF" 2>/dev/null \
+            | sort | uniq -c | sort -nr | awk '{print "  - " $2 ": " $1 " issue(s)"}'
+          echo ""
+
+          echo "Violation Rules (unique):"
+          jq -r '.runs[0].results[]? | .ruleId + "  →  " + (.message.text // "")' "$SARIF" 2>/dev/null \
+            | sort | uniq | sed 's/^/  - /'
+
+      - name: Export scan results to CSV
+        if: always()
+        run: |
+          SARIF=./sarif/output.sarif
+          CSV=./sarif/fortify-results.csv
+
+          if [ ! -f "$SARIF" ]; then
+            echo "⚠️  No SARIF file — skipping CSV export."
+            exit 0
+          fi
+
+          echo "File,Line,Severity,Rule ID,Category,Message" > "$CSV"
+
+          jq -r '
+            .runs[0].results[]? |
+            {
+              file:     (.locations[0]?.physicalLocation?.artifactLocation?.uri // "unknown"),
+              line:     (.locations[0]?.physicalLocation?.region?.startLine // "N/A" | tostring),
+              severity: (.properties."fortify-severity" // "unknown"),
+              ruleId:   (.ruleId // ""),
+              category: (.taxa[0]?.id // .ruleId // ""),
+              message:  (.message.text // "" | gsub("\n";" ") | gsub(",";" "))
+            } |
+            [.file, .line, .severity, .ruleId, .category, .message] |
+            @csv
+          ' "$SARIF" >> "$CSV" 2>/dev/null
+
+          ROWS=$(tail -n +2 "$CSV" | wc -l)
+          echo "✅ CSV exported: $ROWS issue(s) written to $CSV"
+
+      - name: Upload CSV results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortify-csv-report
+          path: ./sarif/fortify-results.csv
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Generate workflow summary
+        if: always()
+        run: |
+          SARIF=./sarif/output.sarif
+
+          {
+            echo "## 🔍 Fortify SAST Scan Summary"
+            echo ""
+
+            if [ ! -f "$SARIF" ]; then
+              echo "⚠️ **No scan results available** — scan may be incomplete or in progress."
+              echo ""
+              echo "[View full logs](#) | [Download SARIF](#) | [Download CSV](#)"
+              echo ""
+            else
+              TOTAL=$(jq '.runs[0].results | length' "$SARIF" 2>/dev/null || echo "0")
+              CRITICAL=$(jq '[.runs[0].results[]? | select(.properties."fortify-severity" == "critical")] | length' "$SARIF" 2>/dev/null || echo "0")
+              HIGH=$(jq '[.runs[0].results[]? | select(.properties."fortify-severity" == "high")] | length' "$SARIF" 2>/dev/null || echo "0")
+              MEDIUM=$(jq '[.runs[0].results[]? | select(.properties."fortify-severity" == "medium")] | length' "$SARIF" 2>/dev/null || echo "0")
+              LOW=$(jq '[.runs[0].results[]? | select(.properties."fortify-severity" == "low")] | length' "$SARIF" 2>/dev/null || echo "0")
+
+              FILES=$(jq '.runs[0].artifacts[]?.location?.uri' "$SARIF" 2>/dev/null | wc -l)
+
+              echo "| Metric | Value |"
+              echo "|--------|-------|"
+              echo "| **Total Issues** | $TOTAL |"
+              echo "| **Critical** | $CRITICAL |"
+              echo "| **High** | $HIGH |"
+              echo "| **Medium** | $MEDIUM |"
+              echo "| **Low** | $LOW |"
+              echo "| **Scanned Files** | $FILES |"
+              echo ""
+
+              if [ "$TOTAL" -eq 0 ]; then
+                echo "✅ **No violations detected** — code passed security scan."
+              else
+                echo "⚠️ **$TOTAL violation(s) found** — review results below or download reports."
+              fi
+
+              echo ""
+              echo "### 📊 Reports & Artifacts"
+              echo ""
+              echo "- 📋 [Download CSV Report](actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}) – Spreadsheet-friendly format for team review"
+              echo "- 📄 [Download SARIF Report](actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}) – GitHub Code Scanning format"
+              echo ""
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail if violations found
+        if: always()
+        run: |
+          SARIF=./sarif/output.sarif
+          if [ ! -f "$SARIF" ]; then
+            echo "⚠️  No SARIF file — skipping violation gate."
+            exit 0
+          fi
+          TOTAL=$(jq '.runs[0].results | length' "$SARIF" 2>/dev/null || echo "0")
+          echo "Checking violation count: $TOTAL"
+          if [ "$TOTAL" -gt 0 ] && [ "$BYPASS_VIOLATIONS" != "true" ]; then
+            echo "❌ SECURITY VIOLATION: Found $TOTAL issues. Failing workflow."
+            echo "To bypass: set BYPASS_VIOLATIONS=true in repo variables or re-run via workflow_dispatch with bypass_violations=true."
+            exit 1
+          elif [ "$TOTAL" -gt 0 ] && [ "$BYPASS_VIOLATIONS" = "true" ]; then
+            echo "⚠️  Violations found ($TOTAL), but bypass is enabled. Passing workflow."
+          else
+            echo "✅ No violations found."
+          fi
+
+      - name: Upload SARIF to GitHub Security tab
+        if: ${{ always() && hashFiles('sarif/output.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ./sarif/output.sarif
+
+      - name: Upload SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fortify-sarif-report
+          path: ./sarif/output.sarif
+          if-no-files-found: warn
+          retention-days: 30      

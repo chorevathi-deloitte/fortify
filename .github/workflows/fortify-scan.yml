@@ -1,0 +1,38 @@
+name: Fortify Vulnerability Scann
+
+# on:
+#   pull_request:
+#     branches:
+#       - main
+
+jobs:
+  fortify-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write  # Required if you want to comment on PRs
+    steps:
+      - name: Check Out Source Code
+        uses: actions/checkout@v4
+    
+      # 1. Setup ScanCentral (to package your code)
+      - name: Setup Fortify ScanCentral
+        uses: fortify/gha-setup-scancentral-client@v2
+    
+      # 2. Package the code into package.zip
+      - name: Package Code
+        run: scancentral package -bt none -o package.zip
+    
+      # 3. Upload DIRECTLY to your existing Release ID
+      - name: Upload to FoD
+        uses: fortify/gha-setup-fod-uploader@v1
+        with:
+          fod-url: "https://api.trial.fortify.com"
+          client-id: ${{ secrets.FOD_CLIENT_ID }}
+          client-secret: ${{ secrets.FOD_CLIENT_SECRET }}
+          # Use the NUMERIC ID (e.g., 12345) from your portal URL
+          release-id: "257019"
+          file: package.zip
+          # This ensures the workflow waits for the scan to finish
+          notes: "Scan triggered from GitHub Actions"
