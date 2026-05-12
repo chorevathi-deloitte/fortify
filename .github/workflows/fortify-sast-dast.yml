@@ -65,27 +65,12 @@ jobs:
       - name: Setup Fortify ScanCentral
         uses: fortify/gha-setup-scancentral-client@v2
 
-      - name: Check and download existing package if available
-        id: check_package
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          cd "$GITHUB_WORKSPACE"
-
-          # Check if package.zip already exists from a previous step or cached artifact
-          if [ -f "package.zip" ]; then
-            echo "✅ Existing package.zip found locally"
-            PACKAGE_SIZE=$(du -h "package.zip" | cut -f1)
-            echo "Package size: $PACKAGE_SIZE"
-            echo "package_exists=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          echo "ℹ️  No cached package.zip found. Will create new package."
-          echo "package_exists=false" >> $GITHUB_OUTPUT
+      - name: Setup Fortify CLI
+        uses: fortify/github-action/setup@v3
+        with:
+          fcli: bootstrapped
 
       - name: Package source for FoD
-        if: steps.check_package.outputs.package_exists != 'true'
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
@@ -123,28 +108,56 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      - name: Download Fortify on Demand Universal CI Tool
-        uses: fortify/gha-setup-fod-uploader@v1
-
-      - name: Perform SAST scan
+      - name: Perform SAST scan (fcli)
         if: ${{ env.RELEASE_ID != '' && env.FOD_TENANT != '' && env.FOD_USER != '' && env.FOD_PAT != '' }}
         run: |
           set -euo pipefail
+
+          echo "Logging in to FoD API..."
+          fcli fod session login \
+            --url "$FOD_API_URL" \
+            --tenant "$FOD_TENANT" \
+            --user "$FOD_USER" \
+            --password "$FOD_PAT"
+
+          echo "Validating release access for RELEASE_ID=$RELEASE_ID"
+          fcli fod release get "$RELEASE_ID" -o json > release.json
+
+          echo "Checking for active Static scans on this release..."
+          fcli fod release lss --rel="$RELEASE_ID" \
+            -q "scanType=='Static' && (analysisStatusType=='InProgress' || analysisStatusType=='Waiting' || analysisStatusType=='Paused')" \
+            -o json > active-static-scans.json
+
+          ACTIVE_COUNT=$(python -c "import json; print(len(json.load(open('active-static-scans.json'))))")
+          if [ "$ACTIVE_COUNT" -gt 0 ]; then
+            echo "❌ A Static scan is already in progress/queued/paused for this release."
+            echo "Existing scans:"
+            cat active-static-scans.json
+            exit 1
+          fi
+
+          echo "Ensuring SAST scan configuration exists on the release..."
+          fcli fod sast-scan setup --rel="$RELEASE_ID" \
+            --audit-preference="Automated" \
+            --assessment-type="Static Assessment" \
+            --frequency="Subscription" \
+            --skip-if-exists || \
+          fcli fod sast-scan setup --rel="$RELEASE_ID" \
+            --audit-preference="Automated" \
+            --assessment-type="Static Assessment" \
+            --frequency="SingleScan" \
+            --skip-if-exists
+
           echo "Starting FoD SAST scan against release $RELEASE_ID"
-          java -jar "$FOD_UPLOAD_JAR" \
-            -z package.zip \
-            -aurl "$FOD_API_URL" \
-            -purl "$FOD_URL" \
-            -rid "$RELEASE_ID" \
-            -tc "$FOD_TENANT" \
-            -uc "$FOD_USER" "$FOD_PAT" \
-            $FOD_UPLOADER_OPTS \
-            -n "$FOD_UPLOADER_NOTES"
+          fcli fod sast-scan start --rel="$RELEASE_ID" -f package.zip -o json > scan-start.json
+          echo "✅ Scan submitted"
+          cat scan-start.json
+
+          echo "Logging out FoD session"
+          fcli fod session logout || true
         env:
           FOD_URL: "https://trial.fortify.com"
           FOD_API_URL: "https://api.trial.fortify.com"
-          FOD_UPLOADER_OPTS: "-ep 2 -pp 2 -I 1 -apf"
-          FOD_UPLOADER_NOTES: "Triggered by GitHub Actions (${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})"
 
       - name: Download Results
         continue-on-error: true
@@ -159,14 +172,12 @@ jobs:
 
       - name: Retry SARIF fetch once if missing
         if: ${{ always() && hashFiles('sarif/output.sarif') == '' }}
-        continue-on-error: true
         run: |
           echo "SARIF not found after first fetch. Waiting 60s for FoD report propagation, then retrying..."
           sleep 60
 
       - name: Download Results (retry)
         if: ${{ always() && hashFiles('sarif/output.sarif') == '' }}
-        continue-on-error: true
         uses: fortify/gha-fod-generate-sarif@1.1.0
         with:
           base-url: "https://trial.fortify.com"
